@@ -203,7 +203,7 @@ void loop()
     {
        available = 0;              
 // Compute calfactor (and update if needed)
-        measdif =(int32_t)((meas_freq0-caltargetfreq0)* 400 / duration); // Error E calculation           
+        measdif =(int32_t)((meas_freq0 - 2 -caltargetfreq0)* 400 / duration); // Error E calculation           
         if(measdif<-50000 || measdif>+50000) // Impossible error, alarm
         {
           digitalWrite(FreqAlarm,LOW);   // meas_freq0 OK : turn the LED OFF 
@@ -217,12 +217,14 @@ void loop()
           digitalWrite(FreqAlarm,LOW);   // meas_freq0 OK : turn the LED OFF 
           alarm = 0;
           measMax = 600  / duration;    // More than 1 tick difference
-          if(measdif>-measMax && measdif<+measMax) // On target
+          if(measdif == 0) // measdif>-measMax && measdif<+measMax) // On target
           {
             LCDmeasdif(true); // display E (measdif) on the LCD
             lock = 1;
             stable_count++;
-            if (stable_count >= 2) {                    // Increase resolution
+//            if (stable_count >= 2) 
+            {                    // Increase resolution
+              stable_count=0;
               new_duration = duration * 2;
               if (new_duration > 400)
                 new_duration = 400;
@@ -231,10 +233,12 @@ void loop()
           else
           {
             stable_count = 0;
+#if 1
             if (measdif > 0)
               measdif += measMax/2;
             else if (measdif < 0)  
               measdif -= measMax/2;
+#endif
             calfact=measdif+calfact; // compute the new calfact
             LCDmeasdif(false); // Call the display Error E (measdif) routine
             if(measdif<-measMax*10 && measdif>+measMax*10) // Too large, increase speed
@@ -264,6 +268,8 @@ void loop()
         Serial.print((double)caltargetfreq0);
         Serial.print(" calf=");
         Serial.print(calfact); 
+        Serial.print(" dur=");
+        Serial.print(duration); 
         if (lock) 
           Serial.println(" Lock");
         else
@@ -293,19 +299,18 @@ void LCDmeasdif(int good)
 {
           lcd.setCursor(0,1);
           lcd.print("                ");
-          String ChLCD= String(measdif);            
-          Chlength=ChLCD.length();  
-          Epos=5-Chlength; // 5=16-8-3 car
-          lcd.setCursor(Epos,1);
+          lcd.setCursor(0,1);
           if (alarm)
-            lcd.print("Alarm,E="); 
+            lcd.print("> "); 
+          if (measdif == 0)
+            lcd.print("lock");
           else
-            lcd.print("Rel.err="); 
-          lcd.print(measdif);
-          if (good) {
-            lcd.setCursor(13,1);
-            lcd.print("e-8");          
-          }
+            lcd.print(measdif);
+          lcd.setCursor(6,1);
+          lcd.print(" "); 
+          lcd.print(duration); 
+          lcd.print("s "); 
+          lcd.print(calfact);
 }          
 
 //***************************************
