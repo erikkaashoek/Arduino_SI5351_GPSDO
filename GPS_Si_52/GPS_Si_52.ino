@@ -9,6 +9,8 @@ Thanks to all of them.
 ==> This new version V.5.0 (May2020) can be used with the present version of the NT7S Si5351 library. I tested it with the 2.1.4 NT7S revision.
 ==> Version V.5.2 (June 2020) : The LCD shows now error E as "Rel.err=-70e-8"
 
+SW modified by Erik Kaashoek to allow for longer measurement times enabling more accuracy.
+
 */
 
 // include the library code:
@@ -42,21 +44,23 @@ byte res,measMax,Epos;
 byte CptInit=1;
 char StartCommand2[7] = "$GPRMC",buffer[300] = "";
 int IndiceCount=0,StartCount=0,counter=0,indices[13];
-int validGPSflag = 1,Freq_Display,Chlength;
+int validGPSflag = 1,Chlength;
 int byteGPS=-1,second=0,minute=0,hour=0;
-unsigned long mult=0;
-float Freq_Disp_Fl;
+unsigned long mult=0;         // Count of overflows of 16 bit counter
 int alarm = 0;
-unsigned int tcount=0;
-int start = 1;
-int duration = 2;
-int new_duration = 2;
-int available = 0;
-int stable_count = 0;
+unsigned int tcount=0;        // counts the seconds in a measurement cycle 
+int start = 1;                // Wait one second after first pps 
+int duration = 2;             // Initial measurement duration
+int new_duration = 2;         // Value of duration for next measurement cycle
+int available = 0;            // Flag set to 1 after pulse counting finished
+int stable_count = 0;         // Count of consecutive measurements without correction needed.
 
-int32_t measdif, calfact =0; 
-int64_t target_freq0, caltargetfreq0,meas_freq0;
-int64_t target_freq1;
+int32_t measdif,              // Measured difference in 1/100 Hz
+  calfact =0;                 // Current correction factor in 1/100 Hz
+int64_t target_freq0,         // The 2.5MHz pulse counted to check SI5351 frequency output
+  caltargetfreq0,             // Target count of pulses
+  meas_freq0;                 // Actual count of pulses
+int64_t target_freq1;         // Additional output frequency
 
 /* Clock - interrupt routine for counting the CLK0 2.5 MHz signal
 Called every second by GPS 1PPS on Arduino Nano D2
@@ -72,9 +76,8 @@ void PPSinterrupt()
   if (tcount == start+duration)  //Stop the counter : the 40 second gate time is elapsed
   {     
     TCCR1B = 0;      //Turn off counter
-    meas_freq0 = mult * 0x10000ULL + TCNT1;   //meas_freq0 is the number of pulses counted during the 40 PPS.
-    caltargetfreq0=2500000*duration;
-//If the Xtal frequency is exactly 25 MHz, thus meas_freq0 = 100000000.    
+    meas_freq0 = mult * 0x10000ULL + TCNT1;   //meas_freq0 is the number of pulses counted during duration PPS.
+    caltargetfreq0=2500000*duration;          //Calculate the target count     
     TCNT1 = 0;       //Reset counter to zero
     mult = 0;
     tcount = 0;      //Reset the seconds counter
@@ -154,7 +157,7 @@ void setup()
 // When testing with the frequency beat method, add or substract 800 Hz (or your choice). 
   if (res==HIGH)
     {
-   target_freq1 = 10000000000ULL; // Freq_1=100MHz
+   target_freq1 = 7000000000ULL; // Freq_1=100MHz
     }
     else
     {
@@ -173,7 +176,6 @@ void setup()
   calfact = -2800; // Determined experimentally for my Si5351A 25 MHz crystal. Run the 'si5351_calibration.ino' program 
   // proposed by NT7S in his examples software package to get the calfact value associated with your Si5351A card.
   // Then use this value as 'your calfact and your calfact_old' instead of -2800.
-//  calfact_old=-2800;
 
   target_freq0=250000000ULL;    // In 1/100 Hz   
   caltargetfreq0=2500000*duration;
@@ -185,10 +187,7 @@ void setup()
   si5351.drive_strength(SI5351_CLK1,SI5351_DRIVE_8MA); // define CLK1 output current
   si5351.set_freq(target_freq1, SI5351_CLK1); 
 
-// Display frequency on the LCD
-  Freq_Display=target_freq1/10000000;
-  Freq_Disp_Fl=float(Freq_Display);
-  Freq_Disp_Fl=Freq_Disp_Fl/10;
+
   dispfreq1();
   
 }
@@ -232,6 +231,10 @@ void loop()
           else
           {
             stable_count = 0;
+            if (measdif > 0)
+              measdif += measMax/2;
+            else if (measdif < 0)  
+              measdif -= measMax/2;
             calfact=measdif+calfact; // compute the new calfact
             LCDmeasdif(false); // Call the display Error E (measdif) routine
             if(measdif<-measMax*10 && measdif>+measMax*10) // Too large, increase speed
@@ -274,6 +277,11 @@ void loop()
 // Display the Si5351A CLK1 frequency on the LCD
 void dispfreq1()
 {
+  
+  // Display frequency on the LCD
+  int Freq_Display=target_freq1/10000000;
+  float Freq_Disp_Fl=float(Freq_Display);
+  Freq_Disp_Fl=Freq_Disp_Fl/10;
   lcd.setCursor(0,0);
   lcd.print(Freq_Disp_Fl,1);
   lcd.print("M   ");    
