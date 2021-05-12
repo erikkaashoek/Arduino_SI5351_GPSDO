@@ -1,7 +1,7 @@
 # Arduino_SI5351_GPSDO
 
 <div align="center">
-<img src="/doc/build.jpg" width="480px">
+<img src="doc/build.jpg" width="480px">
 </div>
 
 Very simple Arduino nano and SI5351 GPSDO using the PPS from a GPS receiver based on:
@@ -14,7 +14,7 @@ Very simple Arduino nano and SI5351 GPSDO using the PPS from a GPS receiver base
  Max measurement time is 400 seconds. 
 
 <div align="center">
-<img src="/doc/monitor.jpg" width="480px">
+<img src="doc/monitor.jpg" width="480px">
 </div>
 
  The serial input from the GPS is not needed, only the PPS pulse. This allows to use the nano USB serial port for status messages and loading new software without having to  decouple the GPS serial.
