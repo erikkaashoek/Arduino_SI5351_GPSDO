@@ -11,10 +11,20 @@ Thanks to all of them.
 
 SW modified by Erik Kaashoek to allow for longer measurement times enabling more accuracy.
 
+Adaptations by LA3ZA, June 2021:
+- I2C display
+- set backlight, control it by rotary encoder
+- display GPS baudrate
+- always 10 MHz
+- removed display of time from interrupt routine
+
+
 */
 
 // include the library code:
-#include <LiquidCrystal.h>
+//#include <LiquidCrystal.h>
+#include <LiquidCrystal_I2C.h> // Install NewliquidCrystal_1.3.4.zip
+
 #include <string.h>
 #include <ctype.h>
 #include <avr/interrupt.h>  
@@ -23,6 +33,11 @@ SW modified by Erik Kaashoek to allow for longer measurement times enabling more
 #include <si5351.h>
 
 Si5351 si5351;
+
+#define LCD_pwm                  11 //   LA3ZA
+int brightness = 64; // initial brightness
+int brightStep = 10;
+
 
 // Set up MCU pins
 #define ppsPin                   2 // from GPS 
@@ -33,11 +48,18 @@ Si5351 si5351;
 #define DB5                     10 // LCD DB5
 #define DB6                     11 // LCD DB6
 #define DB7                     12 // LCD DB7
-#define FreqSelect               4 // Choice between 10MHZ (or another frequency) and F=26 MHz
+#define FreqSelect               A3// 4 // Choice between 10MHZ (or another frequency) and F=26 MHz
 
+// Encoder:
+#define encoderPinA              6 
+#define encoderPinB              4
+#define GPSSelect                3 
+
+static const uint32_t GPSBaud =  9600; // QRPlabs GPS, LA3ZA
 
 // initialize the library with the numbers of the interface pins
-LiquidCrystal lcd(RS, E, DB4, DB5, DB6, DB7);
+//LiquidCrystal lcd(RS, E, DB4, DB5, DB6, DB7);
+LiquidCrystal_I2C lcd(0x3F, 2, 1, 0, 4, 5, 6, 7, 3, POSITIVE);  // Set the LCD I2C address
 
 // Variables 
 byte res,measMax,Epos;
@@ -61,6 +83,8 @@ int64_t target_freq0,         // The 2.5MHz pulse counted to check SI5351 freque
   caltargetfreq0,             // Target count of pulses
   meas_freq0;                 // Actual count of pulses
 int64_t target_freq1;         // Additional output frequency
+
+unsigned int encoderA, encoderB, encoderC = 1; // LA3ZA
 
 /* Clock - interrupt routine for counting the CLK0 2.5 MHz signal
 Called every second by GPS 1PPS on Arduino Nano D2
@@ -96,18 +120,19 @@ void PPSinterrupt()
       hour++;
       minute=0 ;
     }
-    
-    if (hour == 24) hour=0;
-    lcd.setCursor(7,0); // LCD cursor on the right part of Line 0
-    if (hour < 10) lcd.print ("0");
-    lcd.print (hour);
-    lcd.print (":");
-    if (minute < 10) lcd.print ("0");
-    lcd.print (minute);
-    lcd.print (":");
-    if (second < 10) lcd.print ("0");
-    lcd.print (second);
-    lcd.print ("Z");  // UTC Time Indicator
+
+ // display time on LCD removed from interrupt routine, too slow?, screwed up the whole thing with I2C
+//    if (hour == 24) hour=0;
+//    lcd.setCursor(7,0); // LCD cursor on the right part of Line 0
+//    if (hour < 10) lcd.print ("0");
+//    lcd.print (hour);
+//    lcd.print (":");
+//    if (minute < 10) lcd.print ("0");
+//    lcd.print (minute);
+//    lcd.print (":");
+//    if (second < 10) lcd.print ("0");
+//    lcd.print (second);
+//    lcd.print ("Z");  // UTC Time Indicator
   }
 }
 
@@ -150,14 +175,16 @@ void setup()
   // Set Arduino D2 for external interrupt input on the rising edge of GPS 1PPS
   attachInterrupt(0, PPSinterrupt, RISING);  
 
-  Serial.begin(9600);  // Define the GPS port speed
+  //Serial.begin(9600);  // Define the GPS port speed
+  Serial.begin(GPSBaud);  // Define the GPS port speed, LA3ZA
 
 //Read the frequency setting pin
   res=digitalRead(FreqSelect);
 // When testing with the frequency beat method, add or substract 800 Hz (or your choice). 
-  if (res==HIGH)
+  if (res==HIGH)  
     {
-   target_freq1 = 7000000000ULL; // Freq_1=100MHz
+//   target_freq1 = 7000000000ULL; // Freq_1=100MHz
+    target_freq1 = 1000000000ULL; //   Freq_1=10 MHz in 1/100th Hz // no choice, LA3ZA
     }
     else
     {
@@ -165,7 +192,9 @@ void setup()
     }
    
   lcd.setCursor(0,1);
-  lcd.print("Waiting for GPS");
+  // lcd.print("Waiting for GPS");
+  lcd.print("GPS ");lcd.print(GPSBaud);lcd.print(" ...    "); // LA3ZA
+
 
   TCCR1B = 0;    //Turn off Counter
 
@@ -277,6 +306,32 @@ void loop()
           
       }
   } 
+  // LA3ZA --- Rotary encoder algorithm begins here
+ 
+    byte encoderA = digitalRead(encoderPinA);
+    byte encoderB = digitalRead(encoderPinB);
+    if ((encoderA == HIGH) && (encoderC == LOW))
+    {
+      if (encoderB == LOW)
+      {
+        // Decrease brightnress
+            brightness -= brightStep;
+      }
+      else
+      {
+        // Increase brightness
+            brightness += brightStep;
+      }
+      
+    }
+    encoderC = encoderA; 
+
+    
+   brightness = max(brightness, 0);
+   brightness = min(brightness, 255); 
+        
+   analogWrite(LCD_pwm, brightness);
+  
 }
 
 //***********************************
