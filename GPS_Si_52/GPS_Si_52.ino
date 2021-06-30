@@ -361,7 +361,10 @@ void LCDmeasdif(int good)
             lcd.print("lock");
           else
             lcd.print(measdif);
-          lcd.setCursor(6,1);
+            if (duration > 99)   // LA3ZA
+              lcd.setCursor(5,1); //LA3ZA
+            else
+              lcd.setCursor(6,1); 
           lcd.print(" "); 
           lcd.print(duration); 
           lcd.print("s "); 
