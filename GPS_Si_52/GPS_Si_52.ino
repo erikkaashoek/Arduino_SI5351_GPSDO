@@ -36,11 +36,17 @@ Si5351 si5351;
 #define FreqSelect               4 // Choice between 10MHZ (or another frequency) and F=26 MHz
 
 
+#define CAL_FREQ  4500000
+#define CALFACT_START 15900
+#define MIN_PULSES  4
+
+#define MAX_TIME  (int)(1000000000ULL / CAL_FREQ )    // Time to count 1 billion counts
+
 // initialize the library with the numbers of the interface pins
 LiquidCrystal lcd(RS, E, DB4, DB5, DB6, DB7);
 
 // Variables 
-byte res,measMax,Epos;
+byte res,threshold,Epos;
 byte CptInit=1;
 char StartCommand2[7] = "$GPRMC",buffer[300] = "";
 int IndiceCount=0,StartCount=0,counter=0,indices[13];
@@ -56,6 +62,8 @@ int available = 0;            // Flag set to 1 after pulse counting finished
 int stable_count = 0;         // Count of consecutive measurements without correction needed.
 
 int32_t measdif,              // Measured difference in 1/100 Hz
+  old_measdif = 0,
+  measdif_integrated = 0,
   calfact =0;                 // Current correction factor in 1/100 Hz
 int64_t target_freq0,         // The 2.5MHz pulse counted to check SI5351 frequency output
   caltargetfreq0,             // Target count of pulses
@@ -76,8 +84,8 @@ void PPSinterrupt()
   if (tcount == start+duration)  //Stop the counter : the 40 second gate time is elapsed
   {     
     TCCR1B = 0;      //Turn off counter
-    meas_freq0 = mult * 0x10000ULL + TCNT1;   //meas_freq0 is the number of pulses counted during duration PPS.
-    caltargetfreq0=2500000*duration;          //Calculate the target count     
+    meas_freq0 = mult * 0x10000ULL + TCNT1 - MIN_PULSES;   //meas_freq0 is the number of pulses counted during duration PPS.
+    caltargetfreq0=CAL_FREQ*duration;          //Calculate the target count     
     TCNT1 = 0;       //Reset counter to zero
     mult = 0;
     tcount = 0;      //Reset the seconds counter
@@ -118,10 +126,34 @@ ISR(TIMER1_OVF_vect)
   TIFR1 = (1<<TOV1);  //Clear overlow flag by shifting left 
 }
 
+String ToString(uint64_t x)
+{
+     boolean flag = false; // For preventing string return like this 0000123, with a lot of zeros in front.
+     String str = "";      // Start with an empty string.
+     uint64_t y = 10000000000000000000;
+     int res;
+     if (x == 0)  // if x = 0 and this is not testet, then function return a empty string.
+     {
+           str = "0";
+           return str;  // or return "0";
+     }    
+     while (y > 0)
+     {                
+            res = (int)(x / y);
+            if (res > 0)  // Wait for res > 0, then start adding to string.
+                flag = true;
+            if (flag == true)
+                str = str + String(res);
+            x = x - (y * (uint64_t)res);  // Subtract res times * y from x
+            y = y / 10;                   // Reducer y with 10    
+     }
+     return str;
+}  
+
 void setup()
 {
   Wire.begin(1);    // I2C bus address = 1
-  si5351.init(SI5351_CRYSTAL_LOAD_8PF,0,0); // I choose 8pF because 10pF is too large for crystal frequency 
+  si5351.init(SI5351_CRYSTAL_LOAD_8PF,26000000,0); // I choose 8pF because 10pF is too large for crystal frequency 
 //to be properly adjusted on my Adafruit board. May be different with other boards?
 
 //Set up Timer1 as a frequency counter - input at pin 5
@@ -157,11 +189,11 @@ void setup()
 // When testing with the frequency beat method, add or substract 800 Hz (or your choice). 
   if (res==HIGH)
     {
-   target_freq1 = 7000000000ULL; // Freq_1=100MHz
+   target_freq1 = 5000000000ULL; // Freq_1=100MHz
     }
     else
     {
-    target_freq1 = 1000000000ULL; //   Freq_1=10 MHz in 1/100th Hz
+    target_freq1 = 5000000000ULL; //   Freq_1=10 MHz in 1/100th Hz
     }
    
   lcd.setCursor(0,1);
@@ -173,12 +205,12 @@ void setup()
   si5351.output_enable(SI5351_CLK2,0); 
 
 // Set up parameters
-  calfact = -2800; // Determined experimentally for my Si5351A 25 MHz crystal. Run the 'si5351_calibration.ino' program 
+  calfact = CALFACT_START; // Determined experimentally for my Si5351A 25 MHz crystal. Run the 'si5351_calibration.ino' program 
   // proposed by NT7S in his examples software package to get the calfact value associated with your Si5351A card.
   // Then use this value as 'your calfact and your calfact_old' instead of -2800.
 
-  target_freq0=250000000ULL;    // In 1/100 Hz   
-  caltargetfreq0=2500000*duration;
+  target_freq0=CAL_FREQ*100ULL;    // In 1/100 Hz   
+  caltargetfreq0=CAL_FREQ*duration;
 
 // Set up Si5351 calibration factor and frequencies
   si5351.set_correction(calfact, SI5351_PLL_INPUT_XO); 
@@ -203,51 +235,50 @@ void loop()
     {
        available = 0;              
 // Compute calfactor (and update if needed)
-        measdif =(int32_t)((meas_freq0 - 2 -caltargetfreq0)* 400 / duration); // Error E calculation           
+        measdif =(int32_t)((meas_freq0 -caltargetfreq0) * MAX_TIME  / duration); // PPB Error calculation           
         if(measdif<-50000 || measdif>+50000) // Impossible error, alarm
         {
           digitalWrite(FreqAlarm,LOW);   // meas_freq0 OK : turn the LED OFF 
           alarm = 1;
           LCDmeasdif(false); // display E (measdif) on the LCD
           new_duration = 1;
-          stable_count = 0;
         }
         else  
         {
           digitalWrite(FreqAlarm,LOW);   // meas_freq0 OK : turn the LED OFF 
           alarm = 0;
-          measMax = 600  / duration;    // More than 1 tick difference
-          if(measdif == 0) // measdif>-measMax && measdif<+measMax) // On target
+          threshold = 1 * MAX_TIME  / duration;    // More than 3 count difference
+          if(abs(meas_freq0 -caltargetfreq0)<3) // Within threshold, increase duration
           {
             LCDmeasdif(true); // display E (measdif) on the LCD
             lock = 1;
-            stable_count++;
-//            if (stable_count >= 2) 
-            {                    // Increase resolution
-              stable_count=0;
-              new_duration = duration * 2;
-              if (new_duration > 400)
-                new_duration = 400;
+            new_duration = duration * 2;
+            if (new_duration > MAX_TIME)
+              new_duration = MAX_TIME;
+          }
+#if 0
+          if (measdif > 0)
+            measdif += MAX_TIME / duration /2;
+          else if (measdif < 0)  
+            measdif -= MAX_TIME / duration /2;
+#endif
+#if 0
+          if (old_measdif != 0 ) {
+            int32_t ratio = measdif * 100 / old_measdif;
+            if (ratio > 0 && ratio > 20 && ratio < 500) {   // constant drift
+              measdif += measdif;                
             }
           }
-          else
-          {
-            stable_count = 0;
-#if 1
-            if (measdif > 0)
-              measdif += measMax/2;
-            else if (measdif < 0)  
-              measdif -= measMax/2;
+          old_measdif = measdif;
 #endif
-            calfact=measdif+calfact; // compute the new calfact
-            LCDmeasdif(false); // Call the display Error E (measdif) routine
-            if(measdif<-measMax*10 && measdif>+measMax*10) // Too large, increase speed
-            {
-              new_duration = duration / 2;
-              if (new_duration == 0)
-                new_duration = 1;
-            }
-          }      
+          calfact=measdif+calfact; // compute the new calfact
+          LCDmeasdif(false); // Call the display Error E (measdif) routine
+          if(measdif<-threshold*3 && measdif>+threshold*3) // Too large, increase speed
+          {
+            new_duration = duration / 2;
+            if (new_duration == 0)
+              new_duration = 1;
+          }
           si5351.set_correction(calfact, SI5351_PLL_INPUT_XO);
           si5351.set_freq(target_freq0,SI5351_CLK0);
           si5351.set_freq(target_freq1,SI5351_CLK1);
@@ -259,17 +290,19 @@ void loop()
         Serial.print(second);
         Serial.print(" Z");
         
-        Serial.print(" mdif=");
-        Serial.print(measdif);
-
-        Serial.print(" Mfr0=");
-        Serial.print((double)meas_freq0);
-        Serial.print(" Tfr0=");
-        Serial.print((double)caltargetfreq0);
-        Serial.print(" calf=");
-        Serial.print(calfact); 
         Serial.print(" dur=");
         Serial.print(duration); 
+        String str;
+        Serial.print(" meas=");
+        str = ToString(meas_freq0);
+        Serial.print(str);
+        Serial.print(" targ=");
+        str = ToString(caltargetfreq0);
+        Serial.print(str);
+        Serial.print(" dif=");
+        Serial.print(measdif);
+        Serial.print(" calf=");
+        Serial.print(calfact); 
         if (lock) 
           Serial.println(" Lock");
         else
@@ -278,6 +311,8 @@ void loop()
       }
   } 
 }
+
+
 
 //***********************************
 // Display the Si5351A CLK1 frequency on the LCD
