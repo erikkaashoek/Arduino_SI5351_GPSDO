@@ -10,8 +10,8 @@ Very simple Arduino nano and SI5351 GPSDO using the PPS from a GPS receiver base
 
 
  Instead of a fixed 40 seconds measuring time this version scales the measurement time with the measured stability.
- Shortest measurement time is 1 second.
- Max measurement time is 400 seconds. 
+ Shortest measurement time is 1 second giving a 400 part per bilion resolution for frequency correction.
+ Max measurement time is 400 seconds allowing to use the full 1 part per bilion resolution of the frequency correction.
 
 <div align="center">
 <img src="doc/monitor.jpg" width="480px">
