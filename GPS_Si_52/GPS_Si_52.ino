@@ -20,7 +20,7 @@ SW modified by Erik Kaashoek to allow for longer measurement times enabling more
 #include <avr/interrupt.h>  
 #include <avr/io.h>
 #include <Wire.h>
-#include <si5351.h>
+#include "si5351.h"
 
 Si5351 si5351;
 
@@ -36,11 +36,11 @@ Si5351 si5351;
 #define FreqSelect               4 // Choice between 10MHZ (or another frequency) and F=26 MHz
 
 
-#define CAL_FREQ  4500000
-#define CALFACT_START 15900
+#define CAL_FREQ  4500000      // In Hz, maximum is 4.5MHz
+#define CALFACT_START -620
 #define MIN_PULSES  4
 
-#define MAX_TIME  (int)(1000000000ULL / CAL_FREQ )    // Time to count 1 billion counts
+#define MAX_TIME  (int)(100000000ULL / CAL_FREQ )    // Time to count 1 billion counts
 
 // initialize the library with the numbers of the interface pins
 LiquidCrystal lcd(RS, E, DB4, DB5, DB6, DB7);
@@ -57,7 +57,7 @@ int alarm = 0;
 unsigned int tcount=0;        // counts the seconds in a measurement cycle 
 int start = 1;                // Wait one second after first pps 
 int duration = 2;             // Initial measurement duration
-int new_duration = 2;         // Value of duration for next measurement cycle
+int target_duration = 1;         // Value of duration for next measurement cycle
 int available = 0;            // Flag set to 1 after pulse counting finished
 int stable_count = 0;         // Count of consecutive measurements without correction needed.
 
@@ -65,9 +65,8 @@ int32_t measdif,              // Measured difference in 1/100 Hz
   old_measdif = 0,
   measdif_integrated = 0,
   calfact =0;                 // Current correction factor in 1/100 Hz
-int64_t target_freq0,         // The 2.5MHz pulse counted to check SI5351 frequency output
-  caltargetfreq0,             // Target count of pulses
-  meas_freq0;                 // Actual count of pulses
+int64_t target_count,             // Target count of pulses
+  measured_count;                 // Actual count of pulses
 int64_t target_freq1;         // Additional output frequency
 
 /* Clock - interrupt routine for counting the CLK0 2.5 MHz signal
@@ -79,18 +78,30 @@ void PPSinterrupt()
   if (tcount == start) // Start counting the 2.5 MHz signal from Si5351A CLK0
   {
     TCCR1B = 7;    //Clock on rising edge of pin 5
-    duration = new_duration;
-  }
-  if (tcount == start+duration)  //Stop the counter : the 40 second gate time is elapsed
+  } else if (tcount == target_duration + start)  //Stop the counter : the 40 second gate time is elapsed
   {     
     TCCR1B = 0;      //Turn off counter
-    meas_freq0 = mult * 0x10000ULL + TCNT1 - MIN_PULSES;   //meas_freq0 is the number of pulses counted during duration PPS.
-    caltargetfreq0=CAL_FREQ*duration;          //Calculate the target count     
+    measured_count = mult * 0x10000ULL + TCNT1 - MIN_PULSES;   //measured_count is the number of pulses counted during duration PPS.
+    duration = tcount - start;
+    target_count=CAL_FREQ*duration;          //Calculate the target count     
+ready:
     TCNT1 = 0;       //Reset counter to zero
     mult = 0;
     tcount = 0;      //Reset the seconds counter
     available = 1;
   }
+#if 0
+  else if (tcount > start+10) {
+    
+    measured_count = mult * 0x10000ULL + TCNT1 - MIN_PULSES;   //measured_count is the number of pulses counted during duration PPS.
+    duration = tcount - start;
+    target_count=CAL_FREQ*duration;          //Calculate the target count
+    if(abs(measured_count -target_count) > 4) // Within threshold, increase duration
+      TCCR1B = 0;      //Turn off counter
+      goto ready;
+  }
+#endif 
+ 
   if(validGPSflag == 1) //Start the UTC timekeeping process
   {
     second++;  
@@ -153,7 +164,7 @@ String ToString(uint64_t x)
 void setup()
 {
   Wire.begin(1);    // I2C bus address = 1
-  si5351.init(SI5351_CRYSTAL_LOAD_8PF,26000000,0); // I choose 8pF because 10pF is too large for crystal frequency 
+  si5351.init(SI5351_CRYSTAL_LOAD_6PF,26000000,0); // I choose 8pF because 10pF is too large for crystal frequency 
 //to be properly adjusted on my Adafruit board. May be different with other boards?
 
 //Set up Timer1 as a frequency counter - input at pin 5
@@ -163,7 +174,7 @@ void setup()
   TIFR1  = 1;     //Reset overflow
   TIMSK1 = 1;     //Turn on overflow flag
 
-  pinMode(FreqAlarm, OUTPUT); // Alarm LED for weird meas_freq0
+  pinMode(FreqAlarm, OUTPUT); // Alarm LED for weird measured_count
  // Set up the LCD's number of columns and rows 
   lcd.begin(16,2); 
 
@@ -189,11 +200,11 @@ void setup()
 // When testing with the frequency beat method, add or substract 800 Hz (or your choice). 
   if (res==HIGH)
     {
-   target_freq1 = 5000000000ULL; // Freq_1=100MHz
+   target_freq1 = 1000000000ULL; // Freq_1=100MHz
     }
     else
     {
-    target_freq1 = 5000000000ULL; //   Freq_1=10 MHz in 1/100th Hz
+    target_freq1 = 1000000000LL; //   Freq_1=10 MHz in 1/100th Hz
     }
    
   lcd.setCursor(0,1);
@@ -209,13 +220,14 @@ void setup()
   // proposed by NT7S in his examples software package to get the calfact value associated with your Si5351A card.
   // Then use this value as 'your calfact and your calfact_old' instead of -2800.
 
-  target_freq0=CAL_FREQ*100ULL;    // In 1/100 Hz   
-  caltargetfreq0=CAL_FREQ*duration;
+  target_count=CAL_FREQ*duration;
 
 // Set up Si5351 calibration factor and frequencies
   si5351.set_correction(calfact, SI5351_PLL_INPUT_XO); 
   si5351.drive_strength(SI5351_CLK0,SI5351_DRIVE_8MA); // define CLK0 output current
-  si5351.set_freq(target_freq0, SI5351_CLK0);
+  si5351.set_freq(CAL_FREQ*100ULL, SI5351_CLK0);
+//  si5351.drive_strength(SI5351_CLK2,SI5351_DRIVE_8MA); // define CLK2 output current
+//  si5351.set_freq(1000000000, SI5351_CLK2); 
   si5351.drive_strength(SI5351_CLK1,SI5351_DRIVE_8MA); // define CLK1 output current
   si5351.set_freq(target_freq1, SI5351_CLK1); 
 
@@ -235,26 +247,26 @@ void loop()
     {
        available = 0;              
 // Compute calfactor (and update if needed)
-        measdif =(int32_t)((meas_freq0 -caltargetfreq0) * MAX_TIME  / duration); // PPB Error calculation           
+        measdif =(int32_t)((measured_count -target_count) * MAX_TIME  / duration); // PPB Error calculation           
         if(measdif<-50000 || measdif>+50000) // Impossible error, alarm
         {
-          digitalWrite(FreqAlarm,LOW);   // meas_freq0 OK : turn the LED OFF 
+          digitalWrite(FreqAlarm,LOW);   // measured_count OK : turn the LED OFF 
           alarm = 1;
           LCDmeasdif(false); // display E (measdif) on the LCD
-          new_duration = 1;
+          target_duration = 1;
         }
         else  
         {
-          digitalWrite(FreqAlarm,LOW);   // meas_freq0 OK : turn the LED OFF 
+          digitalWrite(FreqAlarm,LOW);   // measured_count OK : turn the LED OFF 
           alarm = 0;
           threshold = 1 * MAX_TIME  / duration;    // More than 3 count difference
-          if(abs(meas_freq0 -caltargetfreq0)<3) // Within threshold, increase duration
+          if(abs(measured_count -target_count) < 4) // Within threshold, increase duration
           {
             LCDmeasdif(true); // display E (measdif) on the LCD
             lock = 1;
-            new_duration = duration * 2;
-            if (new_duration > MAX_TIME)
-              new_duration = MAX_TIME;
+            target_duration = duration * 2;
+            if (target_duration > MAX_TIME)
+              target_duration = MAX_TIME;
           }
 #if 0
           if (measdif > 0)
@@ -271,16 +283,18 @@ void loop()
           }
           old_measdif = measdif;
 #endif
+          if (duration > 100)
+            measdif = measdif / 2;
           calfact=measdif+calfact; // compute the new calfact
           LCDmeasdif(false); // Call the display Error E (measdif) routine
-          if(measdif<-threshold*3 && measdif>+threshold*3) // Too large, increase speed
+          if(abs(measured_count -target_count) > 10) // Too large, increase speed
           {
-            new_duration = duration / 2;
-            if (new_duration == 0)
-              new_duration = 1;
+            target_duration = duration / 2;
+            if (target_duration == 0)
+              target_duration = 1;
           }
           si5351.set_correction(calfact, SI5351_PLL_INPUT_XO);
-          si5351.set_freq(target_freq0,SI5351_CLK0);
+          si5351.set_freq(CAL_FREQ*100ULL,SI5351_CLK0);
           si5351.set_freq(target_freq1,SI5351_CLK1);
         }
         Serial.print(hour);
@@ -294,10 +308,10 @@ void loop()
         Serial.print(duration); 
         String str;
         Serial.print(" meas=");
-        str = ToString(meas_freq0);
+        str = ToString(measured_count);
         Serial.print(str);
         Serial.print(" targ=");
-        str = ToString(caltargetfreq0);
+        str = ToString(target_count);
         Serial.print(str);
         Serial.print(" dif=");
         Serial.print(measdif);
