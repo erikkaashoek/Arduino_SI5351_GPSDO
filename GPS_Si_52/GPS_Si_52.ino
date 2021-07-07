@@ -1,12 +1,12 @@
 /*
-A Time Base using a GPS controlled Si5351A Adafruit board to generate 10 MHz, 26 MHz or any other frequency up to 110 MHz.
+ * A Time Base using a GPS controlled SI5351A Adafruit board to generate 10 MHz, 26 MHz or any other frequency up to 110 MHz.
 Permission is granted to use, copy, modify, and distribute this software and documentation for non-commercial purposes. 
 (F2DC 17 April 2017)
 
 I was greatly helped by the works of Gene Marcus W3PM, Jason Milldrum NT7S-Dana H. Myers K6JQ, Igor Gonzales Martin and many others.
 Thanks to all of them. 
 
-==> This new version V.5.0 (May2020) can be used with the present version of the NT7S Si5351 library. I tested it with the 2.1.4 NT7S revision.
+==> This new version V.5.0 (May2020) can be used with the present version of the NT7S SI5351 library. I tested it with the 2.1.4 NT7S revision.
 ==> Version V.5.2 (June 2020) : The LCD shows now error E as "Rel.err=-70e-8"
 
 SW modified by Erik Kaashoek to allow for longer measurement times enabling more accuracy.
@@ -20,9 +20,6 @@ SW modified by Erik Kaashoek to allow for longer measurement times enabling more
 #include <avr/interrupt.h>  
 #include <avr/io.h>
 #include <Wire.h>
-#include "si5351.h"
-
-Si5351 si5351;
 
 // Set up MCU pins
 #define ppsPin                   2 // from GPS 
@@ -35,12 +32,25 @@ Si5351 si5351;
 #define DB7                     12 // LCD DB7
 #define FreqSelect               4 // Choice between 10MHZ (or another frequency) and F=26 MHz
 
+// Define SI5351A register addresses
+#define CLK_ENABLE_CONTROL       3
+#define CLK0_CONTROL            16 
+#define CLK1_CONTROL            17
+#define CLK2_CONTROL            18
+#define SYNTH_PLL_A             26
+#define SYNTH_PLL_B             34
+#define SYNTH_MS_0              42
+#define SYNTH_MS_1              50
+#define SYNTH_MS_2              58
+#define PLL_RESET              177
+#define XTAL_LOAD_CAP          183
+uint64_t SI5351aSetFreq(int synth, uint64_t freq_x100, int r_div);
 
-#define CAL_FREQ  4500000      // In Hz, maximum is 4.5MHz
-#define CALFACT_START -620
+#define CAL_FREQ  2500000      // In Hz, maximum is 4.5MHz
+#define CALFACT_START 0
 #define MIN_PULSES  4
 
-#define MAX_TIME  (int)(100000000ULL / CAL_FREQ )    // Time to count 1 billion counts
+#define MAX_TIME  (int)(100000000ULL / CAL_FREQ )    // Time to count 0.1 billion counts
 
 // initialize the library with the numbers of the interface pins
 LiquidCrystal lcd(RS, E, DB4, DB5, DB6, DB7);
@@ -75,7 +85,7 @@ Called every second by GPS 1PPS on Arduino Nano D2
 void PPSinterrupt()
 {
   tcount++;// Increment the seconds counter
-  if (tcount == start) // Start counting the 2.5 MHz signal from Si5351A CLK0
+  if (tcount == start) // Start counting the 2.5 MHz signal from SI5351A CLK0
   {
     TCCR1B = 7;    //Clock on rising edge of pin 5
   } else if (tcount == target_duration + start)  //Stop the counter : the 40 second gate time is elapsed
@@ -163,9 +173,13 @@ String ToString(uint64_t x)
 
 void setup()
 {
+  Serial.begin(9600);  // Define the GPS port speed
   Wire.begin(1);    // I2C bus address = 1
-  si5351.init(SI5351_CRYSTAL_LOAD_6PF,26000000,0); // I choose 8pF because 10pF is too large for crystal frequency 
-//to be properly adjusted on my Adafruit board. May be different with other boards?
+  SI5351aStart();  
+  SI5351aSetFreq(SYNTH_MS_0,1000000000ULL,2); 
+  SI5351aSetFreq(SYNTH_MS_1, 1000000000ULL,0);
+//  SI5351_write(CLK_ENABLE_CONTROL,0b00000100); // Turn OFF CLK2
+//  SI5351_write(CLK_ENABLE_CONTROL,0b00000000); // Turn ON CLK2
 
 //Set up Timer1 as a frequency counter - input at pin 5
   TCCR1B = 0;     //Disable Timer during setup
@@ -193,7 +207,6 @@ void setup()
   // Set Arduino D2 for external interrupt input on the rising edge of GPS 1PPS
   attachInterrupt(0, PPSinterrupt, RISING);  
 
-  Serial.begin(9600);  // Define the GPS port speed
 
 //Read the frequency setting pin
   res=digitalRead(FreqSelect);
@@ -213,25 +226,14 @@ void setup()
   TCCR1B = 0;    //Turn off Counter
 
  // Turn OFF CLK2 
-  si5351.output_enable(SI5351_CLK2,0); 
+//  SI5351.output_enable(SI5351_CLK2,0); 
 
 // Set up parameters
-  calfact = CALFACT_START; // Determined experimentally for my Si5351A 25 MHz crystal. Run the 'si5351_calibration.ino' program 
-  // proposed by NT7S in his examples software package to get the calfact value associated with your Si5351A card.
+  calfact = CALFACT_START; // Determined experimentally for my SI5351A 25 MHz crystal. Run the 'SI5351_calibration.ino' program 
+  // proposed by NT7S in his examples software package to get the calfact value associated with your SI5351A card.
   // Then use this value as 'your calfact and your calfact_old' instead of -2800.
 
   target_count=CAL_FREQ*duration;
-
-// Set up Si5351 calibration factor and frequencies
-  si5351.set_correction(calfact, SI5351_PLL_INPUT_XO); 
-  si5351.drive_strength(SI5351_CLK0,SI5351_DRIVE_8MA); // define CLK0 output current
-  si5351.set_freq(CAL_FREQ*100ULL, SI5351_CLK0);
-//  si5351.drive_strength(SI5351_CLK2,SI5351_DRIVE_8MA); // define CLK2 output current
-//  si5351.set_freq(1000000000, SI5351_CLK2); 
-  si5351.drive_strength(SI5351_CLK1,SI5351_DRIVE_8MA); // define CLK1 output current
-  si5351.set_freq(target_freq1, SI5351_CLK1); 
-
-
   dispfreq1();
   
 }
@@ -240,6 +242,8 @@ void setup()
 void loop()
 {
   int lock = 0; 
+  String str = "";
+  uint64_t target_freq,actual_freq;
   if (validGPSflag == 0) GPSprocess( ); //If GPS is selected, wait for valid NMEA data
   else
   {
@@ -293,10 +297,11 @@ void loop()
             if (target_duration == 0)
               target_duration = 1;
           }
-          si5351.set_correction(calfact, SI5351_PLL_INPUT_XO);
-          si5351.set_freq(CAL_FREQ*100ULL,SI5351_CLK0);
-          si5351.set_freq(target_freq1,SI5351_CLK1);
+          target_freq = 1000000000-calfact;
+          SI5351aSetFreq(SYNTH_MS_0,target_freq,2);  // 2.5MHz
+          actual_freq=SI5351aSetFreq(SYNTH_MS_1,target_freq,0);    // 10MHz
         }
+
         Serial.print(hour);
         Serial.print(":");
         Serial.print(minute);
@@ -317,6 +322,12 @@ void loop()
         Serial.print(measdif);
         Serial.print(" calf=");
         Serial.print(calfact); 
+        Serial.print(" tfreq=");
+        str = ToString(target_freq);
+        Serial.print(str);
+        Serial.print(" afreq=");
+        str = ToString(actual_freq);
+        Serial.print(str);
         if (lock) 
           Serial.println(" Lock");
         else
@@ -329,7 +340,7 @@ void loop()
 
 
 //***********************************
-// Display the Si5351A CLK1 frequency on the LCD
+// Display the SI5351A CLK1 frequency on the LCD
 void dispfreq1()
 {
   
@@ -433,3 +444,135 @@ void GPSprocess(void)
     } 
   } 
 }
+
+//------------------------------------- SI5351 -------------------------------------
+// Set SI5351A I2C address
+#define SI5351A_addr          0x60 
+
+
+#define XtalFreq  26000000ULL
+
+//  SI5351aStart();
+//  SI5351aSetFreq(SYNTH_MS_0,2500000); 
+//  SI5351aSetFreq(SYNTH_MS_1, Freq_1);
+//  SI5351_write(CLK_ENABLE_CONTROL,0b00000100); // Turn OFF CLK2
+//  SI5351_write(CLK_ENABLE_CONTROL,0b00000000); // Turn ON CLK2
+//  SI5351aSetFreq(SYNTH_MS_2, Freq_2);          // Set CLK2 frequency
+
+//******************************************************************
+//  SI5351 Multisynch processing
+//******************************************************************
+uint64_t SI5351aSetFreq(int synth, uint64_t freq_x100, int r_div)
+{
+  unsigned long long CalcTemp;
+  unsigned long  a, b, c, p1, p2, p3;
+  uint64_t actual_freq;
+  
+  c = 0xFFFFF;  // Denominator derived from max bits 2^20
+
+  a = ((((uint64_t)XtalFreq) * 3600)) / freq_x100; // 36 is derived from 900/25 MHz
+  unsigned long long rest =  ((((uint64_t)XtalFreq) * 3600)) - a*freq_x100;
+  b = (rest * c) / freq_x100;
+
+  actual_freq = (((uint64_t)XtalFreq * 3600) * c /(a*c + b));
+
+//  CalcTemp = round(XtalFreq * 36) % freq;
+//  CalcTemp *= c;
+//  CalcTemp /= freq ; 
+//  b = CalcTemp;  // Calculated numerator
+
+
+#if 0
+    Serial.print("ab=");
+    Serial.print(a);
+    Serial.print(",");
+    Serial.print(b);
+    Serial.print(", rest=");
+    Serial.print((unsigned long)rest);
+    String str;
+        Serial.print(" target=");
+        str = ToString(freq_x100); Serial.print(str);
+        Serial.print(" actual=");
+        str = ToString(actual_freq); Serial.print(str);
+        Serial.println();
+#endif
+
+  // Refer to SI5351 Register Map AN619 for following formula
+  p3  = c;
+  p2  = (128 * b) % c;
+  p1  = 128 * a;
+  p1 += (128 * b / c);
+  p1 -= 512;
+
+  // Write data to multisynth registers
+  SI5351_write(synth + 0, (p3 & 0xFF00)>>8);  
+  SI5351_write(synth + 1, (p3 & 0xFF));
+  SI5351_write(synth + 2, ((p1 & 0x00030000) >> 16) | ((0x03 & r_div)<<4) );
+  SI5351_write(synth + 3, (p1 & 0x0000FF00) >> 8);
+  SI5351_write(synth + 4, (p1 & 0x000000FF));
+  SI5351_write(synth + 5, ((p3 & 0xF0000) >> 12) | ((p2 & 0x000F0000) >> 16));
+  SI5351_write(synth + 6, (p2 & 0x0000FF00) >> 8);
+  SI5351_write(synth + 7, (p2 & 0x000000FF));
+  return actual_freq;
+}
+
+
+//******************************************************************
+//  SI5351 initialization routines
+//******************************************************************
+void SI5351aStart()
+{
+  // Initialize SI5351A
+  SI5351_write(XTAL_LOAD_CAP,0b01000000);      // Set crystal load to 6pF
+  SI5351_write(CLK_ENABLE_CONTROL,0b00000000); // Enable all outputs
+  SI5351_write(CLK0_CONTROL,0b00001111);       // Set PLLA to CLK0, 8 mA output
+  SI5351_write(CLK1_CONTROL,0b00001111);       // Set PLLA to CLK1, 8 mA output
+  SI5351_write(CLK2_CONTROL,0b00101111);       // Set PLLB to CLK2, 8 mA output
+  SI5351_write(PLL_RESET,0b10100000);          // Reset PLLA and PLLB
+
+
+  // Set PLLA and PLLB to 900 MHz
+  unsigned long  a, b, c, p1, p2, p3;
+
+  a = 36;           // Derived from 900/25 MHz
+  b = 0;            // Numerator
+  c = 0xFFFFF;      // Denominator derived from max bits 2^20
+
+  // Refer to SI5351 Register Map AN619 for following formula
+  p3  = c;
+  p2  = (128 * b) % c;
+  p1  = 128 * a;
+  p1 += (128 * b / c);
+  p1 -= 512;
+
+  // Write data to PLL registers
+  SI5351_write(SYNTH_PLL_A + 0, (p3 & 0xFF00)>>8);
+  SI5351_write(SYNTH_PLL_A + 1, (p3 & 0xFF));
+  SI5351_write(SYNTH_PLL_A + 2, (p1 & 0x00030000) >> 16);
+  SI5351_write(SYNTH_PLL_A + 3, (p1 & 0x0000FF00) >> 8);
+  SI5351_write(SYNTH_PLL_A + 4, (p1 & 0x000000FF));
+  SI5351_write(SYNTH_PLL_A + 5, ((p3 & 0xF0000) >> 12) | ((p2 & 0x000F0000) >> 16));
+  SI5351_write(SYNTH_PLL_A + 6, (p2 & 0x0000FF00) >> 8);
+  SI5351_write(SYNTH_PLL_A + 7, (p2 & 0x000000FF));
+
+  SI5351_write(SYNTH_PLL_B + 0, (p3 & 0xFF00)>>8);
+  SI5351_write(SYNTH_PLL_B + 1, (p3 & 0xFF));
+  SI5351_write(SYNTH_PLL_B + 2, (p1 & 0x00030000) >> 16);
+  SI5351_write(SYNTH_PLL_B + 3, (p1 & 0x0000FF00) >> 8);
+  SI5351_write(SYNTH_PLL_B + 4, (p1 & 0x000000FF));
+  SI5351_write(SYNTH_PLL_B + 5, ((p3 & 0xF0000) >> 12) | ((p2 & 0x000F0000) >> 16));
+  SI5351_write(SYNTH_PLL_B + 6, (p2 & 0x0000FF00) >> 8);
+  SI5351_write(SYNTH_PLL_B + 7, (p2 & 0x000000FF));
+}
+
+//******************************************************************
+//Write I2C data routine
+//******************************************************************
+uint8_t SI5351_write(uint8_t addr, uint8_t data)
+{
+  Wire.beginTransmission(SI5351A_addr);
+  Wire.write(addr);
+  Wire.write(data);
+  Wire.endTransmission();
+}
+//------------------------------------------------------------------------------------------------------
