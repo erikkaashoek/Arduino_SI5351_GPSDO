@@ -45,12 +45,17 @@ SW modified by Erik Kaashoek to allow for longer measurement times enabling more
 #define PLL_RESET              177
 #define XTAL_LOAD_CAP          183
 uint64_t SI5351aSetFreq(int synth, uint64_t freq_x100, int r_div);
+uint64_t SI5351aActualFreq(uint64_t freq_x100);
+uint64_t SI5351aSetPLLFreq(uint32_t a,uint32_t b,uint32_t c);
+uint64_t SI5351aActualPLLFreq(uint32_t a,uint32_t b,uint32_t c);
+
+uint64_t PLLFReq_x100 = 90000000000;
 
 #define CAL_FREQ  2500000      // In Hz, maximum is 4.5MHz
-#define CALFACT_START 0
+#define CALFACT_START 687
 #define MIN_PULSES  4
 
-#define MAX_TIME  (int)(100000000ULL / CAL_FREQ )    // Time to count 0.1 billion counts
+#define MAX_TIME  (int)(1000000000ULL / CAL_FREQ )    // Time to count 1 billion counts
 
 // initialize the library with the numbers of the interface pins
 LiquidCrystal lcd(RS, E, DB4, DB5, DB6, DB7);
@@ -287,9 +292,9 @@ void loop()
           }
           old_measdif = measdif;
 #endif
-          if (duration > 100)
-            measdif = measdif / 2;
-          calfact=measdif+calfact; // compute the new calfact
+         // if (duration > 100)
+         //   measdif = measdif / 2;
+          calfact=calfact - measdif; // compute the new calfact
           LCDmeasdif(false); // Call the display Error E (measdif) routine
           if(abs(measured_count -target_count) > 10) // Too large, increase speed
           {
@@ -297,7 +302,35 @@ void loop()
             if (target_duration == 0)
               target_duration = 1;
           }
-          target_freq = 1000000000-calfact;
+          target_freq = 1000000000+calfact;
+          
+          uint32_t a,b,c, f_a,f_b,f_c;
+          f_c = c = 0xFFFFFUL;
+          uint32_t delta = 100000000;
+          
+          for (a = 24; a<=36; a++) {
+            for (b = 0; b <16; b++) {
+              SI5351aActualPLLFreq(a,b,c);
+              actual_freq = SI5351aActualFreq(target_freq);
+              if (abs(actual_freq - target_freq) < delta) {
+                delta = abs(actual_freq - target_freq);
+                f_a = a;
+                f_b = b;
+                f_c = c;
+              }
+            }
+          }
+          SI5351aActualPLLFreq(f_a,f_b,f_c);
+          SI5351aSetPLLFreq(f_a,f_b,f_c);
+#if 0
+          Serial.print("a,b,c=");
+          Serial.print(f_a);
+          Serial.print(",");
+          Serial.print(f_b);
+          Serial.print(",");
+          Serial.print(f_c);
+          Serial.println();
+#endif
           SI5351aSetFreq(SYNTH_MS_0,target_freq,2);  // 2.5MHz
           actual_freq=SI5351aSetFreq(SYNTH_MS_1,target_freq,0);    // 10MHz
         }
@@ -459,6 +492,15 @@ void GPSprocess(void)
 //  SI5351_write(CLK_ENABLE_CONTROL,0b00000000); // Turn ON CLK2
 //  SI5351aSetFreq(SYNTH_MS_2, Freq_2);          // Set CLK2 frequency
 
+uint64_t SI5351aActualFreq(uint64_t freq_x100)
+{
+  unsigned long  a, b, c;
+  c = 0xFFFFF;  // Denominator derived from max bits 2^20
+  a = PLLFReq_x100 / freq_x100; // 36 is derived from 900/25 MHz
+  unsigned long long rest =  PLLFReq_x100 - a*freq_x100;
+  b = (rest * c) / freq_x100;
+  return( PLLFReq_x100 * c /(a*c + b) );
+}
 //******************************************************************
 //  SI5351 Multisynch processing
 //******************************************************************
@@ -470,11 +512,11 @@ uint64_t SI5351aSetFreq(int synth, uint64_t freq_x100, int r_div)
   
   c = 0xFFFFF;  // Denominator derived from max bits 2^20
 
-  a = ((((uint64_t)XtalFreq) * 3600)) / freq_x100; // 36 is derived from 900/25 MHz
-  unsigned long long rest =  ((((uint64_t)XtalFreq) * 3600)) - a*freq_x100;
+  a = PLLFReq_x100 / freq_x100; // 36 is derived from 900/25 MHz
+  unsigned long long rest =  PLLFReq_x100 - a*freq_x100;
   b = (rest * c) / freq_x100;
 
-  actual_freq = (((uint64_t)XtalFreq * 3600) * c /(a*c + b));
+  actual_freq = PLLFReq_x100 * c /(a*c + b);
 
 //  CalcTemp = round(XtalFreq * 36) % freq;
 //  CalcTemp *= c;
@@ -516,28 +558,30 @@ uint64_t SI5351aSetFreq(int synth, uint64_t freq_x100, int r_div)
   return actual_freq;
 }
 
-
-//******************************************************************
-//  SI5351 initialization routines
-//******************************************************************
-void SI5351aStart()
+uint64_t SI5351aActualPLLFreq(uint32_t a,uint32_t b,uint32_t c)
 {
-  // Initialize SI5351A
-  SI5351_write(XTAL_LOAD_CAP,0b01000000);      // Set crystal load to 6pF
-  SI5351_write(CLK_ENABLE_CONTROL,0b00000000); // Enable all outputs
-  SI5351_write(CLK0_CONTROL,0b00001111);       // Set PLLA to CLK0, 8 mA output
-  SI5351_write(CLK1_CONTROL,0b00001111);       // Set PLLA to CLK1, 8 mA output
-  SI5351_write(CLK2_CONTROL,0b00101111);       // Set PLLB to CLK2, 8 mA output
-  SI5351_write(PLL_RESET,0b10100000);          // Reset PLLA and PLLB
+  PLLFReq_x100 = ((((uint64_t)XtalFreq) * 100) * (a * c + b) / c);
+  return PLLFReq_x100;
+}
 
+uint64_t SI5351aSetPLLFreq(uint32_t a,uint32_t b,uint32_t c)
+{
+  PLLFReq_x100 = ((((uint64_t)XtalFreq) * 100) * (a * c + b) / c);
 
-  // Set PLLA and PLLB to 900 MHz
-  unsigned long  a, b, c, p1, p2, p3;
+#if 0
+    Serial.print("abc=");
+    Serial.print(a);
+    Serial.print(",");
+    Serial.print(b);
+    Serial.print(",");
+    Serial.print(c);
 
-  a = 36;           // Derived from 900/25 MHz
-  b = 0;            // Numerator
-  c = 0xFFFFF;      // Denominator derived from max bits 2^20
+    String str;
+        Serial.print(" PLLFreq=");
+        str = ToString(PLLFReq_x100); Serial.println(str);
+#endif
 
+  unsigned long p1, p2, p3;
   // Refer to SI5351 Register Map AN619 for following formula
   p3  = c;
   p2  = (128 * b) % c;
@@ -563,6 +607,22 @@ void SI5351aStart()
   SI5351_write(SYNTH_PLL_B + 5, ((p3 & 0xF0000) >> 12) | ((p2 & 0x000F0000) >> 16));
   SI5351_write(SYNTH_PLL_B + 6, (p2 & 0x0000FF00) >> 8);
   SI5351_write(SYNTH_PLL_B + 7, (p2 & 0x000000FF));
+}
+
+//******************************************************************
+//  SI5351 initialization routines
+//******************************************************************
+void SI5351aStart()
+{
+  // Initialize SI5351A
+  SI5351_write(XTAL_LOAD_CAP,0b01000000);      // Set crystal load to 6pF
+  SI5351_write(CLK_ENABLE_CONTROL,0b00000000); // Enable all outputs
+  SI5351_write(CLK0_CONTROL,0b00001111);       // Set PLLA to CLK0, 8 mA output
+  SI5351_write(CLK1_CONTROL,0b00001111);       // Set PLLA to CLK1, 8 mA output
+  SI5351_write(CLK2_CONTROL,0b00101111);       // Set PLLB to CLK2, 8 mA output
+  SI5351_write(PLL_RESET,0b10100000);          // Reset PLLA and PLLB
+
+  SI5351aSetPLLFreq((uint32_t)36,(uint32_t)0,(uint32_t)0xFFFFFUL);
 }
 
 //******************************************************************
