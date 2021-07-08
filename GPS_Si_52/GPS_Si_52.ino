@@ -340,27 +340,17 @@ void loop()
         Serial.print(minute);
         Serial.print(":");
         Serial.print(second);
-        Serial.print(" Z");
         
         Serial.print(" dur=");
         Serial.print(duration); 
         String str;
-        Serial.print(" meas=");
-        str = ToString(measured_count);
-        Serial.print(str);
-        Serial.print(" targ=");
-        str = ToString(target_count);
-        Serial.print(str);
-        Serial.print(" dif=");
-        Serial.print(measdif);
-        Serial.print(" calf=");
-        Serial.print(calfact); 
-        Serial.print(" tfreq=");
-        str = ToString(target_freq);
-        Serial.print(str);
-        Serial.print(" afreq=");
+        Serial.print(" dcount=");
+        Serial.print((int)(measured_count -target_count));
+        Serial.print(" freq=");
         str = ToString(actual_freq);
         Serial.print(str);
+        if (target_freq!=actual_freq)
+          Serial.print(" Freq_Error");
         if (lock) 
           Serial.println(" Lock");
         else
