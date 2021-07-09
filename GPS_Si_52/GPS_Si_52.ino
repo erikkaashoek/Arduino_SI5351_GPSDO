@@ -305,11 +305,11 @@ void loop()
           target_freq = 1000000000+calfact;
           
           uint32_t a,b,c, f_a,f_b,f_c;
-          f_c = c = 0xFFFFFUL;
+          f_c = c = 1048575UL - 10000UL;
           uint32_t delta = 100000000;
           
           for (a = 24; a<=36; a++) {
-            for (b = 0; b <16; b++) {
+            for (b = 524287UL; b <524303UL; b++) {
               SI5351aActualPLLFreq(a,b,c);
               actual_freq = SI5351aActualFreq(target_freq);
               if (abs(actual_freq - target_freq) < delta) {
@@ -349,8 +349,10 @@ void loop()
         Serial.print(" freq=");
         str = ToString(actual_freq);
         Serial.print(str);
-        if (target_freq!=actual_freq)
-          Serial.print(" Freq_Error");
+        if (target_freq!=actual_freq) {
+          Serial.print(" Freq_Error = ");
+          Serial.print((int)(target_freq-actual_freq));
+        }
         if (lock) 
           Serial.println(" Lock");
         else
