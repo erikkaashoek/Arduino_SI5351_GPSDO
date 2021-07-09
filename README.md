@@ -20,3 +20,6 @@ Very simple Arduino nano and SI5351 GPSDO using the PPS from a GPS receiver base
  The serial input from the GPS is not needed, only the PPS pulse. This allows to use the nano USB serial port for status messages and loading new software without having to  decouple the GPS serial.
  The rest of the ino file is simplified
  
+ 
+ It is highly recommended to replace the XTal on the SI5351 module with a cheap 26MHz TCXO as the temperature dependency of the XTal makes the SI5351 high unstable.
+ It is also possible to improve stability by thermally isolating the whole SI5351 module or increasing the thermal innertia of the XTal by gluing a large piece of metal on it.
