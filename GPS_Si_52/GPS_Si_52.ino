@@ -32,6 +32,56 @@ SW modified by Erik Kaashoek to allow for longer measurement times enabling more
 #define DB7                     12 // LCD DB7
 #define FreqSelect               4 // Choice between 10MHZ (or another frequency) and F=26 MHz
 
+#define USE_PHASE_DETECTOR  true        // Set to false if the XTAL is too unstable to phase lock
+#define USE_XTAL            true        // Set to false if a stable TCXO is used for the SI5351
+#define PLL_START_DURATION  30          // Start using phase when duration exceeds this.
+
+int64_t PLLFReq_x1000 = 900000000000LL;  // In 1/1000 Hz, will be update to actual frequency
+#define XtalFreq_x1000   25000000000LL   // In 1/1000 Hz
+
+#define CAL_FREQ  2500000UL      // In Hz, maximum is 4.5MHz
+#define CALFACT_START 0       // Can be set to pre-load the correction to speed up locking.
+#define MIN_PULSES  4       // Heuristic number of pulses that are missed due to the code structure.
+
+#define MAX_TIME  (int)(10000000000LL / CAL_FREQ )    // Time to count 1 billion counts
+
+#define TEST  false
+
+// initialize the library with the numbers of the interface pins
+LiquidCrystal lcd(RS, E, DB4, DB5, DB6, DB7);
+
+// Variables 
+byte res,threshold,Epos;
+byte CptInit=1;
+char StartCommand2[7] = "$GPRMC",buffer[300] = "";
+int IndiceCount=0,StartCount=0,counter=0,indices[13];
+int validGPSflag = 1;     // Set to 1 to avoid waiting for a valid GPS string in case no connection between GPS and Arduino
+int Chlength;
+int byteGPS=-1,second=0,minute=0,hour=0;
+int64_t mult=0;         // Count of overflows of 16 bit counter
+int alarm = 0;
+unsigned int tcount=0;        // counts the seconds in a measurement cycle 
+int start = 1;                // Wait one second after first pps 
+int duration = 2;             // Initial measurement duration
+int target_duration = 1;         // Value of duration for next measurement cycle
+int available = 0;            // Flag set to 1 after pulse counting finished
+int stable_count = 0;         // Count of consecutive measurements without correction needed.
+
+int32_t measdif,              // Measured difference in 1/100 Hz
+  calfact =0;                 // Current correction factor in 1/100 Hz
+int64_t target_count,             // Target count of pulses
+  measured_count;                 // Actual count of pulses
+
+volatile int phase = 0;
+int prev_phase = 0;
+int p_delta = 0;
+volatile int tick = 0;
+float p_delta_average = 0;
+int p_delta_count = 0;
+int p_delta_max = 20;
+int p_delta_sum = 0;
+
+
 // Define SI5351A register addresses
 #define CLK_ENABLE_CONTROL       3
 #define CLK0_CONTROL            16 
@@ -49,53 +99,6 @@ int64_t SI5351aActualFreq(int64_t freq_x1000);
 int64_t SI5351aSetPLLFreq(uint32_t a,uint32_t b,uint32_t c);
 int64_t SI5351aActualPLLFreq(uint32_t a,uint32_t b,uint32_t c);
 
-int64_t PLLFReq_x1000 = 900000000000LL;
-#define XtalFreq_x1000   25000000000LL
-
-#define CAL_FREQ  2500000UL      // In Hz, maximum is 4.5MHz
-#define CALFACT_START 687
-#define MIN_PULSES  4
-
-#define MAX_TIME  (int)(10000000000LL / CAL_FREQ )    // Time to count 1 billion counts
-
-#define TEST  false
-
-// initialize the library with the numbers of the interface pins
-LiquidCrystal lcd(RS, E, DB4, DB5, DB6, DB7);
-
-// Variables 
-byte res,threshold,Epos;
-byte CptInit=1;
-char StartCommand2[7] = "$GPRMC",buffer[300] = "";
-int IndiceCount=0,StartCount=0,counter=0,indices[13];
-int validGPSflag = 1,Chlength;
-int byteGPS=-1,second=0,minute=0,hour=0;
-int64_t mult=0;         // Count of overflows of 16 bit counter
-int alarm = 0;
-unsigned int tcount=0;        // counts the seconds in a measurement cycle 
-int start = 1;                // Wait one second after first pps 
-int duration = 2;             // Initial measurement duration
-int target_duration = 1;         // Value of duration for next measurement cycle
-int available = 0;            // Flag set to 1 after pulse counting finished
-int stable_count = 0;         // Count of consecutive measurements without correction needed.
-
-int32_t measdif,              // Measured difference in 1/100 Hz
-  old_measdif = 0,
-  calfact =0;                 // Current correction factor in 1/100 Hz
-int64_t target_count,             // Target count of pulses
-  measured_count;                 // Actual count of pulses
-int64_t target_freq1;         // Additional output frequency
-
-volatile int phase = 0;
-int prev_phase = 0;
-int p_delta = 0;
-volatile int tick = 0;
-float p_delta_average = 0;
-int p_delta_count = 0;
-int p_delta_max = 20;
-int p_delta_sum = 0;
-
-#define PLL_START_DURATION  30
 
 /* Clock - interrupt routine for counting the CLK0 2.5 MHz signal
 Called every second by GPS 1PPS on Arduino Nano D2
@@ -120,7 +123,7 @@ ready:
     tcount = 0;      //Reset the seconds counter
     available = 1;
   }
-#if 0
+#if 0     // Experiment to see if you can stop earlier then target_duration when enough count error detected. Not working!!!
   else if (tcount > start+10) {
     
     measured_count = mult * 0x10000LL + TCNT1 - MIN_PULSES;   //measured_count is the number of pulses counted during duration PPS.
@@ -131,20 +134,20 @@ ready:
       goto ready;
   }
 #endif 
-      phase = analogRead(A0);
-  p_delta = phase - prev_phase;
-  prev_phase = phase;
+  if (USE_PHASE_DETECTOR) {
+    phase = analogRead(A0);
+    p_delta = phase - prev_phase;
+    prev_phase = phase;
 
-  if (p_delta_count < p_delta_max) {
-    if (abs(p_delta)<50) {
-      if (p_delta_count == 0)
-        p_delta_sum = 0;
-      p_delta_sum += p_delta;
-      p_delta_count++;
+    if (p_delta_count < p_delta_max) {
+      if (abs(p_delta)<50) {
+        if (p_delta_count == 0)
+          p_delta_sum = 0;
+          p_delta_sum += p_delta;
+        p_delta_count++;
+      }
     }
   }
-
-  
   if(validGPSflag == 1) //Start the UTC timekeeping process
   {
     second++;  
@@ -188,7 +191,7 @@ ISR(TIMER1_OVF_vect)
   TIFR1 = (1<<TOV1);  //Clear overlow flag by shifting left 
 }
 
-String ToString(int64_t x)
+String ToString(int64_t x)    // Very clumsy conversion of 64 bit numbers
 {
      boolean flag = false; // For preventing string return like this 0000123, with a lot of zeros in front.
      String str = "";      // Start with an empty string.
@@ -221,10 +224,10 @@ void setup()
   Serial.begin(9600);  // Define the GPS port speed
   Wire.begin(1);    // I2C bus address = 1
   SI5351aStart();  
-  SI5351aSetFreq(SYNTH_MS_0,10000000000LL,2); 
-  SI5351aSetFreq(SYNTH_MS_1, 10000000000LL,0);
-//  SI5351_write(CLK_ENABLE_CONTROL,0b00000100); // Turn OFF CLK2
-//  SI5351_write(CLK_ENABLE_CONTROL,0b00000000); // Turn ON CLK2
+  SI5351aSetFreq(SYNTH_MS_0,10000000000LL,2);     // 10MHz, divide by 4
+  SI5351aSetFreq(SYNTH_MS_1, 10000000000LL,0);    // 10MHz
+//  SI5351_write(CLK_ENABLE_CONTROL,0b00000100); // Turn OFF CLK2, not used
+//  SI5351_write(CLK_ENABLE_CONTROL,0b00000000); // Turn ON CLK2, not used
 
 //Set up Timer1 as a frequency counter - input at pin 5
   TCCR1B = 0;     //Disable Timer during setup
@@ -251,19 +254,6 @@ void setup()
 
   // Set Arduino D2 for external interrupt input on the rising edge of GPS 1PPS
   attachInterrupt(0, PPSinterrupt, RISING);  
-
-
-//Read the frequency setting pin
-  res=digitalRead(FreqSelect);
-// When testing with the frequency beat method, add or substract 800 Hz (or your choice). 
-  if (res==HIGH)
-    {
-   target_freq1 = 10000000000LL; // Freq_1=100MHz
-    }
-    else
-    {
-    target_freq1 = 10000000000LL; //   Freq_1=10 MHz in 1/100th Hz
-    }
    
   lcd.setCursor(0,1);
   lcd.print("Waiting for GPS");
@@ -279,8 +269,6 @@ void setup()
   // Then use this value as 'your calfact and your calfact_old' instead of -2800.
 
   target_count=CAL_FREQ*duration;
-  dispfreq1();
-  
 }
 //******************************************************************
 // Loop 
@@ -291,11 +279,10 @@ void loop()
   int64_t target_freq,actual_freq;
   if (validGPSflag == 0) GPSprocess( ); //If GPS is selected, wait for valid NMEA data
   else
-  {
-#if 1    
-    if (target_duration >= PLL_START_DURATION) {
+  {    
+    if (USE_PHASE_DETECTOR && target_duration >= PLL_START_DURATION) {
       if (p_delta_count == p_delta_max) {
-      p_delta_average = (float)p_delta_sum / (float)p_delta_count;
+        p_delta_average = (float)p_delta_sum / (float)p_delta_count;
         Serial.print(hour);
         Serial.print(":");
         Serial.print(minute);
@@ -312,14 +299,13 @@ void loop()
       }
     } else
       p_delta_count = 0;
-#endif
     if(available) // Frequency calculation data available                                   
     {
        available = 0;              
 // Compute calfactor (and update if needed)
         measdif =(int32_t)((measured_count -target_count) * MAX_TIME  / duration); // PPB Error calculation           
 #if 0
-        if(measdif<-50000 || measdif>+50000) // Impossible error, alarm
+        if(measdif<-50000 || measdif>+50000) // Impossible error, alarm, not used
         {
           digitalWrite(FreqAlarm,LOW);   // measured_count OK : turn the LED OFF 
           alarm = 1;
@@ -334,7 +320,7 @@ void loop()
         {
           digitalWrite(FreqAlarm,LOW);   // measured_count OK : turn the LED OFF 
           alarm = 0;
-          threshold = 1 * MAX_TIME  / duration;    // More than 3 count difference
+          threshold = 1 * MAX_TIME  / duration;    // More than 3 count difference, no longer used
           if(abs(measured_count -target_count) < 4) // Within threshold, increase duration
           {
             LCDmeasdif(true); // display E (measdif) on the LCD
@@ -343,24 +329,8 @@ void loop()
             if (target_duration > MAX_TIME)
               target_duration = MAX_TIME;
           }
-#if 0
-          if (measdif > 0)
-            measdif += MAX_TIME / duration /2;
-          else if (measdif < 0)  
-            measdif -= MAX_TIME / duration /2;
-#endif
-#if 0
-          if (old_measdif != 0 ) {
-            int32_t ratio = measdif * 100 / old_measdif;
-            if (ratio > 0 && ratio > 20 && ratio < 500) {   // constant drift
-              measdif += measdif;                
-            }
-          }
-          old_measdif = measdif;
-#endif
-         // if (duration > 100)
-         //   measdif = measdif / 2;
-          if (target_duration < PLL_START_DURATION) {
+
+          if (target_duration < PLL_START_DURATION) {   // Not yet in phase detection mode
             calfact=calfact - measdif; // compute the new calfact
             LCDmeasdif(false); // Call the display Error E (measdif) routine
             if(abs(measured_count -target_count) > 10) // Too large, increase speed
@@ -372,11 +342,16 @@ void loop()
           }
     update:
           target_freq = 10000000000+calfact;
-          
+
+
+          // 
+          // This routine searches the best combination of PLL and fractional divider settings to minimize the frequency error
           uint32_t a,b,c, f_a=36,f_b=0,f_c;
           f_c = c = 1048575UL - 10000UL;
           uint32_t delta = 100000000;
-goto fixed_CVO ;         
+        
+          if (USE_XTAL)         // XTAL drifts when changing VCO PLL settings so skip
+            goto fixed_CVO ;         
           for (a = 24; a<=36; a++) {
             for (b = 524287UL; b <524303UL; b++) {
               SI5351aActualPLLFreq(a,b,c);
@@ -435,22 +410,6 @@ goto fixed_CVO ;
           
       }
   } 
-}
-
-
-
-//***********************************
-// Display the SI5351A CLK1 frequency on the LCD
-void dispfreq1()
-{
-  
-  // Display frequency on the LCD
-  int Freq_Display=target_freq1/100000000;
-  float Freq_Disp_Fl=float(Freq_Display);
-  Freq_Disp_Fl=Freq_Disp_Fl/10;
-//  lcd.setCursor(0,0);
-//  lcd.print(Freq_Disp_Fl,1);
-//  lcd.print("M   ");    
 }
 
 //************************************
