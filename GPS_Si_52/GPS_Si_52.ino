@@ -44,18 +44,21 @@ SW modified by Erik Kaashoek to allow for longer measurement times enabling more
 #define SYNTH_MS_2              58
 #define PLL_RESET              177
 #define XTAL_LOAD_CAP          183
-uint64_t SI5351aSetFreq(int synth, uint64_t freq_x100, int r_div);
-uint64_t SI5351aActualFreq(uint64_t freq_x100);
-uint64_t SI5351aSetPLLFreq(uint32_t a,uint32_t b,uint32_t c);
-uint64_t SI5351aActualPLLFreq(uint32_t a,uint32_t b,uint32_t c);
+int64_t SI5351aSetFreq(int synth, int64_t freq_x1000, int r_div);
+int64_t SI5351aActualFreq(int64_t freq_x1000);
+int64_t SI5351aSetPLLFreq(uint32_t a,uint32_t b,uint32_t c);
+int64_t SI5351aActualPLLFreq(uint32_t a,uint32_t b,uint32_t c);
 
-uint64_t PLLFReq_x100 = 90000000000;
+int64_t PLLFReq_x1000 = 900000000000LL;
+#define XtalFreq_x1000   25000000000LL
 
-#define CAL_FREQ  2500000      // In Hz, maximum is 4.5MHz
+#define CAL_FREQ  2500000UL      // In Hz, maximum is 4.5MHz
 #define CALFACT_START 687
 #define MIN_PULSES  4
 
-#define MAX_TIME  (int)(1000000000ULL / CAL_FREQ )    // Time to count 1 billion counts
+#define MAX_TIME  (int)(10000000000LL / CAL_FREQ )    // Time to count 1 billion counts
+
+#define TEST  false
 
 // initialize the library with the numbers of the interface pins
 LiquidCrystal lcd(RS, E, DB4, DB5, DB6, DB7);
@@ -67,7 +70,7 @@ char StartCommand2[7] = "$GPRMC",buffer[300] = "";
 int IndiceCount=0,StartCount=0,counter=0,indices[13];
 int validGPSflag = 1,Chlength;
 int byteGPS=-1,second=0,minute=0,hour=0;
-unsigned long mult=0;         // Count of overflows of 16 bit counter
+int64_t mult=0;         // Count of overflows of 16 bit counter
 int alarm = 0;
 unsigned int tcount=0;        // counts the seconds in a measurement cycle 
 int start = 1;                // Wait one second after first pps 
@@ -78,11 +81,21 @@ int stable_count = 0;         // Count of consecutive measurements without corre
 
 int32_t measdif,              // Measured difference in 1/100 Hz
   old_measdif = 0,
-  measdif_integrated = 0,
   calfact =0;                 // Current correction factor in 1/100 Hz
 int64_t target_count,             // Target count of pulses
   measured_count;                 // Actual count of pulses
 int64_t target_freq1;         // Additional output frequency
+
+volatile int phase = 0;
+int prev_phase = 0;
+int p_delta = 0;
+volatile int tick = 0;
+float p_delta_average = 0;
+int p_delta_count = 0;
+int p_delta_max = 20;
+int p_delta_sum = 0;
+
+#define PLL_START_DURATION  30
 
 /* Clock - interrupt routine for counting the CLK0 2.5 MHz signal
 Called every second by GPS 1PPS on Arduino Nano D2
@@ -93,12 +106,14 @@ void PPSinterrupt()
   if (tcount == start) // Start counting the 2.5 MHz signal from SI5351A CLK0
   {
     TCCR1B = 7;    //Clock on rising edge of pin 5
-  } else if (tcount == target_duration + start)  //Stop the counter : the 40 second gate time is elapsed
+  } else if (tcount == target_duration + start || (tcount > start  && TEST) ) //Stop the counter : the 40 second gate time is elapsed
   {     
     TCCR1B = 0;      //Turn off counter
-    measured_count = mult * 0x10000ULL + TCNT1 - MIN_PULSES;   //measured_count is the number of pulses counted during duration PPS.
-    duration = tcount - start;
-    target_count=CAL_FREQ*duration;          //Calculate the target count     
+    measured_count = TCNT1;   //measured_count is the number of pulses counted during duration PPS.
+    measured_count += ((int64_t)mult) * 0x10000LL - (int64_t)MIN_PULSES;   //measured_count is the number of pulses counted during duration PPS.
+    duration = target_duration;
+    target_count=((int64_t)CAL_FREQ)*duration;          //Calculate the target count     
+    if (TEST) measured_count = target_count + 1;
 ready:
     TCNT1 = 0;       //Reset counter to zero
     mult = 0;
@@ -108,7 +123,7 @@ ready:
 #if 0
   else if (tcount > start+10) {
     
-    measured_count = mult * 0x10000ULL + TCNT1 - MIN_PULSES;   //measured_count is the number of pulses counted during duration PPS.
+    measured_count = mult * 0x10000LL + TCNT1 - MIN_PULSES;   //measured_count is the number of pulses counted during duration PPS.
     duration = tcount - start;
     target_count=CAL_FREQ*duration;          //Calculate the target count
     if(abs(measured_count -target_count) > 4) // Within threshold, increase duration
@@ -116,7 +131,20 @@ ready:
       goto ready;
   }
 #endif 
- 
+      phase = analogRead(A0);
+  p_delta = phase - prev_phase;
+  prev_phase = phase;
+
+  if (p_delta_count < p_delta_max) {
+    if (abs(p_delta)<50) {
+      if (p_delta_count == 0)
+        p_delta_sum = 0;
+      p_delta_sum += p_delta;
+      p_delta_count++;
+    }
+  }
+
+  
   if(validGPSflag == 1) //Start the UTC timekeeping process
   {
     second++;  
@@ -132,6 +160,14 @@ ready:
     }
     
     if (hour == 24) hour=0;
+    lcd.setCursor(0,0);
+    if (phase < 100) lcd.print (" ");
+    if (phase < 10) lcd.print (" ");
+    lcd.print(phase);
+    if (p_delta >= 0)
+      lcd.print(" ");
+    lcd.print(p_delta);
+    lcd.print("     ");    
     lcd.setCursor(7,0); // LCD cursor on the right part of Line 0
     if (hour < 10) lcd.print ("0");
     lcd.print (hour);
@@ -141,7 +177,7 @@ ready:
     lcd.print (":");
     if (second < 10) lcd.print ("0");
     lcd.print (second);
-    lcd.print ("Z");  // UTC Time Indicator
+ //   lcd.print ("Z");  // UTC Time Indicator
   }
 }
 
@@ -152,12 +188,16 @@ ISR(TIMER1_OVF_vect)
   TIFR1 = (1<<TOV1);  //Clear overlow flag by shifting left 
 }
 
-String ToString(uint64_t x)
+String ToString(int64_t x)
 {
      boolean flag = false; // For preventing string return like this 0000123, with a lot of zeros in front.
      String str = "";      // Start with an empty string.
      uint64_t y = 10000000000000000000;
      int res;
+    if (x<0) {
+      x = -x;
+     str = "-";
+    }
      if (x == 0)  // if x = 0 and this is not testet, then function return a empty string.
      {
            str = "0";
@@ -170,7 +210,7 @@ String ToString(uint64_t x)
                 flag = true;
             if (flag == true)
                 str = str + String(res);
-            x = x - (y * (uint64_t)res);  // Subtract res times * y from x
+            x = x - (y * (int64_t)res);  // Subtract res times * y from x
             y = y / 10;                   // Reducer y with 10    
      }
      return str;
@@ -181,8 +221,8 @@ void setup()
   Serial.begin(9600);  // Define the GPS port speed
   Wire.begin(1);    // I2C bus address = 1
   SI5351aStart();  
-  SI5351aSetFreq(SYNTH_MS_0,1000000000ULL,2); 
-  SI5351aSetFreq(SYNTH_MS_1, 1000000000ULL,0);
+  SI5351aSetFreq(SYNTH_MS_0,10000000000LL,2); 
+  SI5351aSetFreq(SYNTH_MS_1, 10000000000LL,0);
 //  SI5351_write(CLK_ENABLE_CONTROL,0b00000100); // Turn OFF CLK2
 //  SI5351_write(CLK_ENABLE_CONTROL,0b00000000); // Turn ON CLK2
 
@@ -207,7 +247,7 @@ void setup()
   
    // Set up IO switches
   pinMode(FreqSelect, INPUT);  // Initialize the frequency select pin
-  digitalWrite(FreqSelect, HIGH); // internal pull-up enabled 
+  digitalWrite(FreqSelect, HIGH); // internal pLL-up enabled 
 
   // Set Arduino D2 for external interrupt input on the rising edge of GPS 1PPS
   attachInterrupt(0, PPSinterrupt, RISING);  
@@ -218,11 +258,11 @@ void setup()
 // When testing with the frequency beat method, add or substract 800 Hz (or your choice). 
   if (res==HIGH)
     {
-   target_freq1 = 1000000000ULL; // Freq_1=100MHz
+   target_freq1 = 10000000000LL; // Freq_1=100MHz
     }
     else
     {
-    target_freq1 = 1000000000LL; //   Freq_1=10 MHz in 1/100th Hz
+    target_freq1 = 10000000000LL; //   Freq_1=10 MHz in 1/100th Hz
     }
    
   lcd.setCursor(0,1);
@@ -248,23 +288,49 @@ void loop()
 {
   int lock = 0; 
   String str = "";
-  uint64_t target_freq,actual_freq;
+  int64_t target_freq,actual_freq;
   if (validGPSflag == 0) GPSprocess( ); //If GPS is selected, wait for valid NMEA data
   else
   {
+#if 1    
+    if (target_duration >= PLL_START_DURATION) {
+      if (p_delta_count == p_delta_max) {
+      p_delta_average = (float)p_delta_sum / (float)p_delta_count;
+        Serial.print(hour);
+        Serial.print(":");
+        Serial.print(minute);
+        Serial.print(":");
+        Serial.print(second);
+        Serial.print(" p_average=");
+        Serial.println(p_delta_average); 
+        p_delta_count = 0;
+        measdif = p_delta_average*18;
+        calfact += measdif;
+        LCDmeasdif(true); // display E (measdif) on the LCD
+        tcount = 0;
+        goto update;
+      }
+    } else
+      p_delta_count = 0;
+#endif
     if(available) // Frequency calculation data available                                   
     {
        available = 0;              
 // Compute calfactor (and update if needed)
         measdif =(int32_t)((measured_count -target_count) * MAX_TIME  / duration); // PPB Error calculation           
+#if 0
         if(measdif<-50000 || measdif>+50000) // Impossible error, alarm
         {
           digitalWrite(FreqAlarm,LOW);   // measured_count OK : turn the LED OFF 
           alarm = 1;
           LCDmeasdif(false); // display E (measdif) on the LCD
-          target_duration = 1;
+          target_duration /= 2;
+          if (target_duration == 0)
+              target_duration = 1;
+
         }
         else  
+#endif
         {
           digitalWrite(FreqAlarm,LOW);   // measured_count OK : turn the LED OFF 
           alarm = 0;
@@ -294,20 +360,23 @@ void loop()
 #endif
          // if (duration > 100)
          //   measdif = measdif / 2;
-          calfact=calfact - measdif; // compute the new calfact
-          LCDmeasdif(false); // Call the display Error E (measdif) routine
-          if(abs(measured_count -target_count) > 10) // Too large, increase speed
-          {
-            target_duration = duration / 2;
-            if (target_duration == 0)
-              target_duration = 1;
+          if (target_duration < PLL_START_DURATION) {
+            calfact=calfact - measdif; // compute the new calfact
+            LCDmeasdif(false); // Call the display Error E (measdif) routine
+            if(abs(measured_count -target_count) > 10) // Too large, increase speed
+            {
+              target_duration = duration / 2;
+              if (target_duration == 0)
+                target_duration = 1;
+            }
           }
-          target_freq = 1000000000+calfact;
+    update:
+          target_freq = 10000000000+calfact;
           
-          uint32_t a,b,c, f_a,f_b,f_c;
+          uint32_t a,b,c, f_a=36,f_b=0,f_c;
           f_c = c = 1048575UL - 10000UL;
           uint32_t delta = 100000000;
-          
+goto fixed_CVO ;         
           for (a = 24; a<=36; a++) {
             for (b = 524287UL; b <524303UL; b++) {
               SI5351aActualPLLFreq(a,b,c);
@@ -320,6 +389,7 @@ void loop()
               }
             }
           }
+   fixed_CVO:
           SI5351aActualPLLFreq(f_a,f_b,f_c);
           SI5351aSetPLLFreq(f_a,f_b,f_c);
 #if 0
@@ -333,6 +403,9 @@ void loop()
 #endif
           SI5351aSetFreq(SYNTH_MS_0,target_freq,2);  // 2.5MHz
           actual_freq=SI5351aSetFreq(SYNTH_MS_1,target_freq,0);    // 10MHz
+          p_delta_count = 0;
+          p_delta_sum = 0;
+          p_delta_average = 0.0;
         }
 
         Serial.print(hour);
@@ -344,10 +417,12 @@ void loop()
         Serial.print(" dur=");
         Serial.print(duration); 
         String str;
+        Serial.print(" tcount="); str = ToString(target_count);  Serial.print(str);
+        Serial.print(" acount="); str = ToString(measured_count);  Serial.print(str);
         Serial.print(" dcount=");
         Serial.print((int)(measured_count -target_count));
         Serial.print(" freq=");
-        str = ToString(actual_freq);
+        str = ToString(target_freq);
         Serial.print(str);
         if (target_freq!=actual_freq) {
           Serial.print(" Freq_Error = ");
@@ -370,12 +445,12 @@ void dispfreq1()
 {
   
   // Display frequency on the LCD
-  int Freq_Display=target_freq1/10000000;
+  int Freq_Display=target_freq1/100000000;
   float Freq_Disp_Fl=float(Freq_Display);
   Freq_Disp_Fl=Freq_Disp_Fl/10;
-  lcd.setCursor(0,0);
-  lcd.print(Freq_Disp_Fl,1);
-  lcd.print("M   ");    
+//  lcd.setCursor(0,0);
+//  lcd.print(Freq_Disp_Fl,1);
+//  lcd.print("M   ");    
 }
 
 //************************************
@@ -475,7 +550,6 @@ void GPSprocess(void)
 #define SI5351A_addr          0x60 
 
 
-#define XtalFreq  26000000ULL
 
 //  SI5351aStart();
 //  SI5351aSetFreq(SYNTH_MS_0,2500000); 
@@ -484,31 +558,31 @@ void GPSprocess(void)
 //  SI5351_write(CLK_ENABLE_CONTROL,0b00000000); // Turn ON CLK2
 //  SI5351aSetFreq(SYNTH_MS_2, Freq_2);          // Set CLK2 frequency
 
-uint64_t SI5351aActualFreq(uint64_t freq_x100)
+int64_t SI5351aActualFreq(int64_t freq_x1000)
 {
   unsigned long  a, b, c;
   c = 0xFFFFF;  // Denominator derived from max bits 2^20
-  a = PLLFReq_x100 / freq_x100; // 36 is derived from 900/25 MHz
-  unsigned long long rest =  PLLFReq_x100 - a*freq_x100;
-  b = (rest * c) / freq_x100;
-  return( PLLFReq_x100 * c /(a*c + b) );
+  a = PLLFReq_x1000 / freq_x1000; // 36 is derived from 900/25 MHz
+  int64_t rest =  PLLFReq_x1000 - a*freq_x1000;
+  b = (rest * c) / freq_x1000;
+  return( PLLFReq_x1000 * c /(a*c + b) );
 }
 //******************************************************************
 //  SI5351 Multisynch processing
 //******************************************************************
-uint64_t SI5351aSetFreq(int synth, uint64_t freq_x100, int r_div)
+int64_t SI5351aSetFreq(int synth, int64_t freq_x1000, int r_div)
 {
-  unsigned long long CalcTemp;
+  int64_t CalcTemp;
   unsigned long  a, b, c, p1, p2, p3;
-  uint64_t actual_freq;
+  int64_t actual_freq;
   
   c = 0xFFFFF;  // Denominator derived from max bits 2^20
 
-  a = PLLFReq_x100 / freq_x100; // 36 is derived from 900/25 MHz
-  unsigned long long rest =  PLLFReq_x100 - a*freq_x100;
-  b = (rest * c) / freq_x100;
+  a = PLLFReq_x1000 / freq_x1000; // 36 is derived from 900/25 MHz
+  int64_t rest =  PLLFReq_x1000 - a*freq_x1000;
+  b = (rest * c) / freq_x1000;
 
-  actual_freq = PLLFReq_x100 * c /(a*c + b);
+  actual_freq = PLLFReq_x1000 * c /(a*c + b);
 
 //  CalcTemp = round(XtalFreq * 36) % freq;
 //  CalcTemp *= c;
@@ -522,10 +596,10 @@ uint64_t SI5351aSetFreq(int synth, uint64_t freq_x100, int r_div)
     Serial.print(",");
     Serial.print(b);
     Serial.print(", rest=");
-    Serial.print((unsigned long)rest);
+    Serial.print((long) rest);
     String str;
         Serial.print(" target=");
-        str = ToString(freq_x100); Serial.print(str);
+        str = ToString(freq_x1000); Serial.print(str);
         Serial.print(" actual=");
         str = ToString(actual_freq); Serial.print(str);
         Serial.println();
@@ -550,15 +624,15 @@ uint64_t SI5351aSetFreq(int synth, uint64_t freq_x100, int r_div)
   return actual_freq;
 }
 
-uint64_t SI5351aActualPLLFreq(uint32_t a,uint32_t b,uint32_t c)
+int64_t SI5351aActualPLLFreq(uint32_t a,uint32_t b,uint32_t c)
 {
-  PLLFReq_x100 = ((((uint64_t)XtalFreq) * 100) * (a * c + b) / c);
-  return PLLFReq_x100;
+  PLLFReq_x1000 = (XtalFreq_x1000 * (a * c + b) / c);
+  return PLLFReq_x1000;
 }
 
-uint64_t SI5351aSetPLLFreq(uint32_t a,uint32_t b,uint32_t c)
+int64_t SI5351aSetPLLFreq(uint32_t a,uint32_t b,uint32_t c)
 {
-  PLLFReq_x100 = ((((uint64_t)XtalFreq) * 100) * (a * c + b) / c);
+  PLLFReq_x1000 = (XtalFreq_x1000 * (a * c + b) / c);
 
 #if 0
     Serial.print("abc=");
@@ -570,7 +644,7 @@ uint64_t SI5351aSetPLLFreq(uint32_t a,uint32_t b,uint32_t c)
 
     String str;
         Serial.print(" PLLFreq=");
-        str = ToString(PLLFReq_x100); Serial.println(str);
+        str = ToString(PLLFReq_x1000); Serial.println(str);
 #endif
 
   unsigned long p1, p2, p3;
