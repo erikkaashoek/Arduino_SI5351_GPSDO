@@ -27,7 +27,7 @@ https://www.eevblog.com/forum/projects/lars-diy-gpsdo-with-arduino-and-1ns-resol
  
  The phase detector is optionally but will inprove locking speed and accuracy
  <div align="center">
-<img src="Phase_detector_7474.jpg" width="480px">
+<img src="doc/Phase_detector_7474.JPG" width="480px">
 </div>
  
  A discussion on this design can be found here:
