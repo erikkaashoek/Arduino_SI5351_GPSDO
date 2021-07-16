@@ -37,7 +37,7 @@ SW modified by Erik Kaashoek to allow for longer measurement times enabling more
 #define PLL_START_DURATION  30          // Start using phase when duration exceeds this.
 
 int64_t PLLFReq_x1000 = 900000000000LL;  // In 1/1000 Hz, will be update to actual frequency
-int64_t XtalFreq_x1000 = 25000000000LL;   // In 1/1000 Hz
+int64_t XtalFreq_x1000 = 26000000000LL;   // In 1/1000 Hz
 
 #define CAL_FREQ  2500000UL      // In Hz, maximum is 4.5MHz
 #define CALFACT_START 0       // Can be set to pre-load the correction to speed up locking.
@@ -164,13 +164,17 @@ ready:
     
     if (hour == 24) hour=0;
     lcd.setCursor(0,0);
+#if 0
     if (phase < 100) lcd.print (" ");
     if (phase < 10) lcd.print (" ");
     lcd.print(phase);
+#endif
     if (p_delta >= 0)
       lcd.print(" ");
+    if (abs(p_delta) < 100) lcd.print (" ");
+    if (abs(p_delta) < 10) lcd.print (" ");
     lcd.print(p_delta);
-    lcd.print("     ");    
+//    lcd.print("     ");    
     lcd.setCursor(7,0); // LCD cursor on the right part of Line 0
     if (hour < 10) lcd.print ("0");
     lcd.print (hour);
@@ -282,7 +286,7 @@ void loop()
   else
   {    
     if (USE_PHASE_DETECTOR && target_duration >= PLL_START_DURATION) {
-      if (p_delta_count == p_delta_max) {
+      if (p_delta_count == p_delta_max || (p_delta_count > 4 && fabs((float)p_delta_sum / (float)p_delta_count) > 10)) {
         p_delta_average = (float)p_delta_sum / (float)p_delta_count;
         Serial.print(hour);
         Serial.print(":");
@@ -332,7 +336,7 @@ void loop()
               target_duration = MAX_TIME;
           }
 
-          if (target_duration < PLL_START_DURATION) {   // Not yet in phase detection mode
+          if (target_duration < PLL_START_DURATION || !phase_locked) {   // Not yet in phase detection mode
             calfact=calfact - measdif; // compute the new calfact
             LCDmeasdif(false); // Call the display Error E (measdif) routine
             if(abs(measured_count -target_count) > 10) // Too large, increase speed
@@ -344,7 +348,7 @@ void loop()
           }
     update:
           target_freq = 10000000000;
-          XtalFreq_x1000 = 25000000000LL - calfact*2;
+          XtalFreq_x1000 = 25000000000LL - calfact*2 - calfact/2;
 
           // 
           // This routine searches the best combination of PLL and fractional divider settings to minimize the frequency error
@@ -400,9 +404,14 @@ void loop()
           Serial.print(" dcount=");
           Serial.print((int)(measured_count -target_count));
         }
+#if 0
         Serial.print(" freq=");
         str = ToString(target_freq);
         Serial.print(str);
+#else
+        Serial.print(" corr=");
+        Serial.print(calfact);
+#endif
         if (target_freq!=actual_freq) {
           Serial.print(" Freq_Error = ");
           Serial.print((int)(target_freq-actual_freq));
@@ -425,11 +434,10 @@ void LCDmeasdif(int good)
           lcd.setCursor(0,1);
           if (alarm)
             lcd.print("> "); 
-          if (measdif == 0)
-            lcd.print("lock");
-          else
-            lcd.print(measdif);
-          lcd.setCursor(6,1);
+          if (measdif < 0) lcd.print(" "); 
+          if (abs(measdif) < 100) lcd.print(" "); 
+          if (abs(measdif) < 10) lcd.print(" "); 
+          lcd.print(measdif);
           lcd.print(" "); 
           lcd.print(duration); 
           lcd.print("s "); 
