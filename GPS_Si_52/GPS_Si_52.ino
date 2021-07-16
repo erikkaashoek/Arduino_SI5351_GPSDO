@@ -33,11 +33,11 @@ SW modified by Erik Kaashoek to allow for longer measurement times enabling more
 #define FreqSelect               4 // Choice between 10MHZ (or another frequency) and F=26 MHz
 
 #define USE_PHASE_DETECTOR  true        // Set to false if the XTAL is too unstable to phase lock
-#define USE_XTAL            true        // Set to false if a stable TCXO is used for the SI5351
+#define USE_XTAL            false       // Set to false if a stable TCXO is used for the SI5351
 #define PLL_START_DURATION  30          // Start using phase when duration exceeds this.
 
 int64_t PLLFReq_x1000 = 900000000000LL;  // In 1/1000 Hz, will be update to actual frequency
-#define XtalFreq_x1000   25000000000LL   // In 1/1000 Hz
+int64_t XtalFreq_x1000 = 25000000000LL;   // In 1/1000 Hz
 
 #define CAL_FREQ  2500000UL      // In Hz, maximum is 4.5MHz
 #define CALFACT_START 0       // Can be set to pre-load the correction to speed up locking.
@@ -274,6 +274,7 @@ void setup()
 // Loop 
 void loop()
 {
+  int phase_locked = false;
   int lock = 0; 
   String str = "";
   int64_t target_freq,actual_freq;
@@ -289,12 +290,13 @@ void loop()
         Serial.print(":");
         Serial.print(second);
         Serial.print(" p_average=");
-        Serial.println(p_delta_average); 
+        Serial.print(p_delta_average); 
         p_delta_count = 0;
         measdif = p_delta_average*18;
         calfact += measdif;
         LCDmeasdif(true); // display E (measdif) on the LCD
         tcount = 0;
+        phase_locked = true;
         goto update;
       }
     } else
@@ -341,8 +343,8 @@ void loop()
             }
           }
     update:
-          target_freq = 10000000000+calfact;
-
+          target_freq = 10000000000;
+          XtalFreq_x1000 = 25000000000LL - calfact*2;
 
           // 
           // This routine searches the best combination of PLL and fractional divider settings to minimize the frequency error
@@ -383,19 +385,21 @@ void loop()
           p_delta_average = 0.0;
         }
 
-        Serial.print(hour);
-        Serial.print(":");
-        Serial.print(minute);
-        Serial.print(":");
-        Serial.print(second);
-        
-        Serial.print(" dur=");
-        Serial.print(duration); 
         String str;
-        Serial.print(" tcount="); str = ToString(target_count);  Serial.print(str);
-        Serial.print(" acount="); str = ToString(measured_count);  Serial.print(str);
-        Serial.print(" dcount=");
-        Serial.print((int)(measured_count -target_count));
+        if (!phase_locked) {
+          Serial.print(hour);
+          Serial.print(":");
+          Serial.print(minute);
+          Serial.print(":");
+          Serial.print(second);
+        
+          Serial.print(" dur=");
+          Serial.print(duration); 
+          Serial.print(" tcount="); str = ToString(target_count);  Serial.print(str);
+          Serial.print(" acount="); str = ToString(measured_count);  Serial.print(str);
+          Serial.print(" dcount=");
+          Serial.print((int)(measured_count -target_count));
+        }
         Serial.print(" freq=");
         str = ToString(target_freq);
         Serial.print(str);
