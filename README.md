@@ -18,6 +18,8 @@ https://www.eevblog.com/forum/projects/lars-diy-gpsdo-with-arduino-and-1ns-resol
 <img src="doc/monitor.jpg" width="480px">
 </div>
 
+The SI5351 is controlled by special SW included to enable the SI5351 to be set with 1/1000 Hz accuracy
+
  The serial input from the GPS is not needed, only the PPS pulse. This allows to use the nano USB serial port for status messages and loading new software without having to  decouple the GPS serial.
  The rest of the ino file is simplified
  
