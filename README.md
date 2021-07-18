@@ -24,10 +24,10 @@ The SI5351 is controlled by special SW included to enable the SI5351 to be set w
  The rest of the ino file is simplified
  
  
- It is highly recommended to replace the XTal on the SI5351 module with a cheap 26MHz TCXO as the temperature dependency of the XTal makes the SI5351 unstable.
+ It is highly recommended to replace the XTal on the SI5351 module with a cheap TCXO as the temperature dependency of the XTal makes the SI5351 unstable.
  It is also possible to improve stability by thermally isolating the whole SI5351 module or increasing the thermal innertia of the XTal by gluing a large piece of metal on it.
  
- The phase detector is optionally but will inprove locking speed and accuracy
+ The phase detector is optionally but will inprove locking speed and accuracy. Connect the Vphase output to the A0 input of the Arduino nano
  <div align="center">
 <img src="doc/Phase_detector_7474.JPG" width="480px">
 </div>
