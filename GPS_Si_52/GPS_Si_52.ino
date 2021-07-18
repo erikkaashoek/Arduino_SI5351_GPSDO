@@ -38,6 +38,7 @@ SW modified by Erik Kaashoek to allow for longer measurement times enabling more
 
 int64_t PLLFReq_x1000 = 900000000000LL;  // In 1/1000 Hz, will be update to actual frequency
 int64_t XtalFreq_x1000 = 26000000000LL;   // In 1/1000 Hz
+#define INITIAL_XTAL 26000000000LL
 
 #define CAL_FREQ  2500000UL      // In Hz, maximum is 4.5MHz
 #define CALFACT_START 0       // Can be set to pre-load the correction to speed up locking.
@@ -69,6 +70,7 @@ int stable_count = 0;         // Count of consecutive measurements without corre
 
 int32_t measdif,              // Measured difference in 1/100 Hz
   calfact =0;                 // Current correction factor in 1/100 Hz
+  int32_t prev_calfact = 0;
 int64_t target_count,             // Target count of pulses
   measured_count;                 // Actual count of pulses
 
@@ -78,7 +80,7 @@ int p_delta = 0;
 volatile int tick = 0;
 float p_delta_average = 0;
 int p_delta_count = 0;
-int p_delta_max = 20;
+int p_delta_max = 10;
 int p_delta_sum = 0;
 
 
@@ -286,17 +288,31 @@ void loop()
   else
   {    
     if (USE_PHASE_DETECTOR && target_duration >= PLL_START_DURATION) {
-      if (p_delta_count == p_delta_max || (p_delta_count > 4 && fabs((float)p_delta_sum / (float)p_delta_count) > 10)) {
+      if (p_delta_count == p_delta_max /* || (p_delta_count > 10 && fabs((float)p_delta_sum / (float)p_delta_count ) > 10)*/) {
         p_delta_average = (float)p_delta_sum / (float)p_delta_count;
         Serial.print(hour);
         Serial.print(":");
         Serial.print(minute);
         Serial.print(":");
         Serial.print(second);
+        Serial.print(" dur=");
+        Serial.print(p_delta_max); 
+
         Serial.print(" p_average=");
         Serial.print(p_delta_average); 
         p_delta_count = 0;
-        measdif = p_delta_average*18;
+        if (p_delta_max > 10 && p_delta_average > 4.0) {
+          p_delta_max /= 2;
+        }
+        if (p_delta_max < 40 && p_delta_average < 1.0) {
+          p_delta_max *= 2;
+          while (target_duration < p_delta_max)
+            target_duration *= 2;
+        }
+        if (fabs(p_delta_average) < 2.0)
+          measdif = p_delta_average*9;      // Half speed to avoid overcompensations
+        else
+          measdif = p_delta_average*18;
         calfact += measdif;
         LCDmeasdif(true); // display E (measdif) on the LCD
         tcount = 0;
@@ -310,7 +326,7 @@ void loop()
        available = 0;              
 // Compute calfactor (and update if needed)
         measdif =(int32_t)((measured_count -target_count) * MAX_TIME  / duration); // PPB Error calculation           
-#if 0
+#if 1
         if(measdif<-50000 || measdif>+50000) // Impossible error, alarm, not used
         {
           digitalWrite(FreqAlarm,LOW);   // measured_count OK : turn the LED OFF 
@@ -348,7 +364,7 @@ void loop()
           }
     update:
           target_freq = 10000000000;
-          XtalFreq_x1000 = 25000000000LL - calfact*2 - calfact/2;
+          XtalFreq_x1000 = INITIAL_XTAL - calfact*2 - calfact/2;
 
           // 
           // This routine searches the best combination of PLL and fractional divider settings to minimize the frequency error
@@ -399,18 +415,30 @@ void loop()
         
           Serial.print(" dur=");
           Serial.print(duration); 
-          Serial.print(" tcount="); str = ToString(target_count);  Serial.print(str);
+//          Serial.print(" tcount="); str = ToString(target_count);  Serial.print(str);
           Serial.print(" acount="); str = ToString(measured_count);  Serial.print(str);
           Serial.print(" dcount=");
           Serial.print((int)(measured_count -target_count));
         }
-#if 0
-        Serial.print(" freq=");
-        str = ToString(target_freq);
-        Serial.print(str);
-#else
-        Serial.print(" corr=");
+#if 1
+        Serial.print(" calfact=");
         Serial.print(calfact);
+        Serial.print(" freq=");
+        str = ToString(10000000000ULL + (int64_t)calfact);
+        Serial.print(str);
+
+        Serial.print(" corr=");
+        int e = 0;
+        float f = ((float)(calfact - prev_calfact))/10000000000.0;
+        while (f != 0.0 && fabs(f) < 1.0) {
+          f *= 10.0;
+          e--;
+        }
+        Serial.print(f,1);
+        Serial.print("e");
+        Serial.print(e);
+
+        prev_calfact = calfact;
 #endif
         if (target_freq!=actual_freq) {
           Serial.print(" Freq_Error = ");
@@ -434,7 +462,7 @@ void LCDmeasdif(int good)
           lcd.setCursor(0,1);
           if (alarm)
             lcd.print("> "); 
-          if (measdif < 0) lcd.print(" "); 
+          if (measdif > 0) lcd.print(" "); 
           if (abs(measdif) < 100) lcd.print(" "); 
           if (abs(measdif) < 10) lcd.print(" "); 
           lcd.print(measdif);
