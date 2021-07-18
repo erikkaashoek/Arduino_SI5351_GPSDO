@@ -14,12 +14,34 @@ SW modified by Erik Kaashoek to allow for longer measurement times enabling more
 */
 
 // include the library code:
-#include <LiquidCrystal.h>
 #include <string.h>
 #include <ctype.h>
 #include <avr/interrupt.h>  
 #include <avr/io.h>
 #include <Wire.h>
+
+//#define OLED
+#define LCD
+#ifdef LCD
+#include <LiquidCrystal.h>
+#endif
+#ifdef OLED
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#define SCREEN_WIDTH 128 // OLED display width, in pixels
+#define SCREEN_HEIGHT 64 // OLED display height, in pixels
+// Declaration for an SSD1306 display connected to I2C (SDA, SCL pins)
+#define OLED_RESET     4 // Reset pin # (or -1 if sharing Arduino reset pin)
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+#endif
+
+#ifdef LCD
+#define displ lcd
+#define displ_setCursor(X,Y) lcd.setCursor(X, Y)
+#else
+#define displ display
+#define displ_setCursor(X,Y) displ.setCursor(X*10, Y*32)
+#endif
 
 // Set up MCU pins
 #define ppsPin                   2 // from GPS 
@@ -48,9 +70,10 @@ int64_t XtalFreq_x1000 = 26000000000LL;   // In 1/1000 Hz
 
 #define TEST  false
 
+#ifdef LCD
 // initialize the library with the numbers of the interface pins
 LiquidCrystal lcd(RS, E, DB4, DB5, DB6, DB7);
-
+#endif
 // Variables 
 byte res,threshold,Epos;
 byte CptInit=1;
@@ -165,28 +188,28 @@ ready:
     }
     
     if (hour == 24) hour=0;
-    lcd.setCursor(0,0);
+    displ_setCursor(0,0);
 #if 0
-    if (phase < 100) lcd.print (" ");
-    if (phase < 10) lcd.print (" ");
-    lcd.print(phase);
+    if (phase < 100) displ.print (F(" "));
+    if (phase < 10) displ.print (F(" "));
+    displ.print(phase);
 #endif
     if (p_delta >= 0)
-      lcd.print(" ");
-    if (abs(p_delta) < 100) lcd.print (" ");
-    if (abs(p_delta) < 10) lcd.print (" ");
-    lcd.print(p_delta);
-//    lcd.print("     ");    
-    lcd.setCursor(7,0); // LCD cursor on the right part of Line 0
-    if (hour < 10) lcd.print ("0");
-    lcd.print (hour);
-    lcd.print (":");
-    if (minute < 10) lcd.print ("0");
-    lcd.print (minute);
-    lcd.print (":");
-    if (second < 10) lcd.print ("0");
-    lcd.print (second);
- //   lcd.print ("Z");  // UTC Time Indicator
+      displ.print(F(" "));
+    if (abs(p_delta) < 100) displ.print (F(" "));
+    if (abs(p_delta) < 10) displ.print (F(" "));
+    displ.print(p_delta);
+//    displ.print(F("     "));    
+    displ_setCursor(7,0); // LCD cursor on the right part of Line 0
+    if (hour < 10) displ.print (F("0"));
+    displ.print (hour);
+    displ.print (F(":"));
+    if (minute < 10) displ.print (F("0"));
+    displ.print (minute);
+    displ.print (F(":"));
+    if (second < 10) displ.print (F("0"));
+    displ.print (second);
+ //   displ.print (F("Z"));  // UTC Time Indicator
   }
 }
 
@@ -244,14 +267,26 @@ void setup()
 
   pinMode(FreqAlarm, OUTPUT); // Alarm LED for weird measured_count
  // Set up the LCD's number of columns and rows 
-  lcd.begin(16,2); 
+#ifdef LCD
 
+  lcd.begin(16,2); 
+  lcd.display();           // initialize LCD
+#endif
+#ifdef OLED
+  if(!display.begin(SSD1306_EXTERNALVCC, 0x3C)) { 
+    Serial.println(F("SSD1306 allocation failed"));
+  }
+  display.display();
+  display.clearDisplay();
+  display.setTextSize(3);             // Normal 1:1 pixel scale
+  display.setTextColor(SSD1306_WHITE);        // Draw white text
+
+#endif
   // GPS 1pps input
   pinMode(ppsPin, INPUT);
 
-  lcd.display();           // initialize LCD
-  lcd.setCursor(0,1);
-  lcd.print(" F2DC V.5.2"); // display version number on the LCD
+  displ_setCursor(0,1);
+  displ.print(F(" F2DC V.5.2")); // display version number on the LCD
   delay(1000);
   
    // Set up IO switches
@@ -261,8 +296,8 @@ void setup()
   // Set Arduino D2 for external interrupt input on the rising edge of GPS 1PPS
   attachInterrupt(0, PPSinterrupt, RISING);  
    
-  lcd.setCursor(0,1);
-  lcd.print("Waiting for GPS");
+  displ_setCursor(0,1);
+  displ.print(F("Waiting for GPS"));
 
   TCCR1B = 0;    //Turn off Counter
 
@@ -291,15 +326,16 @@ void loop()
       if (p_delta_count == p_delta_max /* || (p_delta_count > 10 && fabs((float)p_delta_sum / (float)p_delta_count ) > 10)*/) {
         p_delta_average = (float)p_delta_sum / (float)p_delta_count;
         Serial.print(hour);
-        Serial.print(":");
+        Serial.print(F(":"));
         Serial.print(minute);
-        Serial.print(":");
+        Serial.print(F(":"));
         Serial.print(second);
-        Serial.print(" dur=");
+        Serial.print(F(" dur="));
         Serial.print(p_delta_max); 
 
-        Serial.print(" p_average=");
+        Serial.print(F(" p_average="));
         Serial.print(p_delta_average); 
+        Serial.print(F(" dummy=0"));
         p_delta_count = 0;
         if (p_delta_max > 10 && p_delta_average > 4.0) {
           p_delta_max /= 2;
@@ -390,11 +426,11 @@ void loop()
           SI5351aActualPLLFreq(f_a,f_b,f_c);
           SI5351aSetPLLFreq(f_a,f_b,f_c);
 #if 0
-          Serial.print("a,b,c=");
+          Serial.print(F("a,b,c="));
           Serial.print(f_a);
-          Serial.print(",");
+          Serial.print(F(","));
           Serial.print(f_b);
-          Serial.print(",");
+          Serial.print(F(","));
           Serial.print(f_c);
           Serial.println();
 #endif
@@ -408,26 +444,26 @@ void loop()
         String str;
         if (!phase_locked) {
           Serial.print(hour);
-          Serial.print(":");
+          Serial.print(F(":"));
           Serial.print(minute);
-          Serial.print(":");
+          Serial.print(F(":"));
           Serial.print(second);
         
-          Serial.print(" dur=");
+          Serial.print(F(" dur="));
           Serial.print(duration); 
-//          Serial.print(" tcount="); str = ToString(target_count);  Serial.print(str);
-          Serial.print(" acount="); str = ToString(measured_count);  Serial.print(str);
-          Serial.print(" dcount=");
+//          Serial.print(F(" tcount=")); str = ToString(target_count);  Serial.print(str);
+          Serial.print(F(" acount=")); str = ToString(measured_count);  Serial.print(str);
+          Serial.print(F(" dcount="));
           Serial.print((int)(measured_count -target_count));
         }
 #if 1
-        Serial.print(" calfact=");
+        Serial.print(F(" calfact="));
         Serial.print(calfact);
-        Serial.print(" freq=");
+        Serial.print(F(" freq="));
         str = ToString(10000000000ULL + (int64_t)calfact);
         Serial.print(str);
 
-        Serial.print(" corr=");
+        Serial.print(F(" corr="));
         int e = 0;
         float f = ((float)(calfact - prev_calfact))/10000000000.0;
         while (f != 0.0 && fabs(f) < 1.0) {
@@ -435,19 +471,19 @@ void loop()
           e--;
         }
         Serial.print(f,1);
-        Serial.print("e");
+        Serial.print(F("e"));
         Serial.print(e);
 
         prev_calfact = calfact;
 #endif
         if (target_freq!=actual_freq) {
-          Serial.print(" Freq_Error = ");
+          Serial.print(F(" Freq_Error = "));
           Serial.print((int)(target_freq-actual_freq));
         }
         if (lock) 
-          Serial.println(" Lock");
+          Serial.println(F(" Lock"));
         else
-          Serial.println(" ");
+          Serial.println(F(" "));
           
       }
   } 
@@ -457,19 +493,19 @@ void loop()
 // Display on the LCD the difference E between measured CLK0 and theoretical 100e6 
 void LCDmeasdif(int good)
 {
-          lcd.setCursor(0,1);
-          lcd.print("                ");
-          lcd.setCursor(0,1);
+          displ_setCursor(0,1);
+          displ.print(F("                "));
+          displ_setCursor(0,1);
           if (alarm)
-            lcd.print("> "); 
-          if (measdif > 0) lcd.print(" "); 
-          if (abs(measdif) < 100) lcd.print(" "); 
-          if (abs(measdif) < 10) lcd.print(" "); 
-          lcd.print(measdif);
-          lcd.print(" "); 
-          lcd.print(duration); 
-          lcd.print("s "); 
-          lcd.print(calfact);
+            displ.print(F("> ")); 
+          if (measdif > 0) displ.print(F(" ")); 
+          if (abs(measdif) < 100) displ.print(F(" ")); 
+          if (abs(measdif) < 10) displ.print(F(" ")); 
+          displ.print(measdif);
+          displ.print(F(" ")); 
+          displ.print(duration); 
+          displ.print(F("s ")); 
+          displ.print(calfact);
 }          
 
 //***************************************
@@ -526,8 +562,8 @@ void GPSprocess(void)
           if (buffer[temp+1] == 65) // Check for "A", ie GPS data valid
             {
             validGPSflag = 1; 
-            lcd.setCursor(0,1);
-              lcd.print("               ");
+            displ_setCursor(0,1);
+              displ.print(F("               "));
             }             
           else
             {
@@ -590,16 +626,16 @@ int64_t SI5351aSetFreq(int synth, int64_t freq_x1000, int r_div)
 
 
 #if 0
-    Serial.print("ab=");
+    Serial.print(F("ab="));
     Serial.print(a);
-    Serial.print(",");
+    Serial.print(F(","));
     Serial.print(b);
-    Serial.print(", rest=");
+    Serial.print(F(", rest="));
     Serial.print((long) rest);
     String str;
-        Serial.print(" target=");
+        Serial.print(F(" target="));
         str = ToString(freq_x1000); Serial.print(str);
-        Serial.print(" actual=");
+        Serial.print(F(" actual="));
         str = ToString(actual_freq); Serial.print(str);
         Serial.println();
 #endif
@@ -634,15 +670,15 @@ int64_t SI5351aSetPLLFreq(uint32_t a,uint32_t b,uint32_t c)
   PLLFReq_x1000 = (XtalFreq_x1000 * (a * c + b) / c);
 
 #if 0
-    Serial.print("abc=");
+    Serial.print(F("abc="));
     Serial.print(a);
-    Serial.print(",");
+    Serial.print(F(","));
     Serial.print(b);
-    Serial.print(",");
+    Serial.print(F(","));
     Serial.print(c);
 
     String str;
-        Serial.print(" PLLFreq=");
+        Serial.print(F(" PLLFreq="));
         str = ToString(PLLFReq_x1000); Serial.println(str);
 #endif
 
