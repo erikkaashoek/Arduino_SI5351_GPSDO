@@ -1,5 +1,4 @@
-/*
- * A Time Base using a GPS controlled SI5351A Adafruit board to generate 10 MHz, 26 MHz or any other frequency up to 110 MHz.
+/* A Time Base using a GPS controlled SI5351A Adafruit board to generate 10 MHz, 26 MHz or any other frequency up to 110 MHz.
 Permission is granted to use, copy, modify, and distribute this software and documentation for non-commercial purposes. 
 (F2DC 17 April 2017)
 
@@ -91,9 +90,9 @@ int target_duration = 1;         // Value of duration for next measurement cycle
 int available = 0;            // Flag set to 1 after pulse counting finished
 int stable_count = 0;         // Count of consecutive measurements without correction needed.
 
-int32_t measdif,              // Measured difference in 1/100 Hz
-  calfact =0;                 // Current correction factor in 1/100 Hz
-  int32_t prev_calfact = 0;
+int32_t measdif_x10,              // Measured difference in 1/100 Hz
+  calfact_x10 =0;                 // Current correction factor in 1/100 Hz
+  int32_t prev_calfact_x10 = 0;
 int64_t target_count,             // Target count of pulses
   measured_count;                 // Actual count of pulses
 
@@ -165,7 +164,7 @@ ready:
     prev_phase = phase;
 
     if (p_delta_count < p_delta_max) {
-      if (abs(p_delta)<50) {
+      if (abs(p_delta)<250) {
         if (p_delta_count == 0)
           p_delta_sum = 0;
           p_delta_sum += p_delta;
@@ -284,7 +283,7 @@ void setup()
 #endif
   // GPS 1pps input
   pinMode(ppsPin, INPUT);
-
+  analogReference(INTERNAL);
   displ_setCursor(0,1);
   displ.print(F(" F2DC V.5.2")); // display version number on the LCD
   delay(1000);
@@ -305,7 +304,7 @@ void setup()
 //  SI5351.output_enable(SI5351_CLK2,0); 
 
 // Set up parameters
-  calfact = CALFACT_START; // Determined experimentally for my SI5351A 25 MHz crystal. Run the 'SI5351_calibration.ino' program 
+  calfact_x10 = CALFACT_START; // Determined experimentally for my SI5351A 25 MHz crystal. Run the 'SI5351_calibration.ino' program 
   // proposed by NT7S in his examples software package to get the calfact value associated with your SI5351A card.
   // Then use this value as 'your calfact and your calfact_old' instead of -2800.
 
@@ -345,11 +344,11 @@ void loop()
           while (target_duration < p_delta_max)
             target_duration *= 2;
         }
-        if (fabs(p_delta_average) < 2.0)
-          measdif = p_delta_average*9;      // Half speed to avoid overcompensations
+        if (fabs(p_delta_average) < 10.0)
+          measdif_x10 = p_delta_average*20;      // Half speed to avoid overcompensations
         else
-          measdif = p_delta_average*18;
-        calfact += measdif;
+          measdif_x10 = p_delta_average*40;
+        calfact_x10 += measdif_x10;
         LCDmeasdif(true); // display E (measdif) on the LCD
         tcount = 0;
         phase_locked = true;
@@ -361,9 +360,9 @@ void loop()
     {
        available = 0;              
 // Compute calfactor (and update if needed)
-        measdif =(int32_t)((measured_count -target_count) * MAX_TIME  / duration); // PPB Error calculation           
+        measdif_x10 =(int32_t)((measured_count -target_count) * MAX_TIME  / duration)*10; // PPB Error calculation           
 #if 1
-        if(measdif<-50000 || measdif>+50000) // Impossible error, alarm, not used
+        if(measdif_x10<-500000 || measdif_x10>+500000) // Impossible error, alarm, not used
         {
           digitalWrite(FreqAlarm,LOW);   // measured_count OK : turn the LED OFF 
           alarm = 1;
@@ -389,7 +388,7 @@ void loop()
           }
 
           if (target_duration < PLL_START_DURATION || !phase_locked) {   // Not yet in phase detection mode
-            calfact=calfact - measdif; // compute the new calfact
+            calfact_x10=calfact_x10 - measdif_x10; // compute the new calfact
             LCDmeasdif(false); // Call the display Error E (measdif) routine
             if(abs(measured_count -target_count) > 10) // Too large, increase speed
             {
@@ -400,7 +399,7 @@ void loop()
           }
     update:
           target_freq = 10000000000;
-          XtalFreq_x1000 = INITIAL_XTAL - calfact*2 - calfact/2;
+          XtalFreq_x1000 = INITIAL_XTAL - calfact_x10/4;
 
           // 
           // This routine searches the best combination of PLL and fractional divider settings to minimize the frequency error
@@ -458,14 +457,14 @@ void loop()
         }
 #if 1
         Serial.print(F(" calfact="));
-        Serial.print(calfact);
+        Serial.print(calfact_x10);
         Serial.print(F(" freq="));
-        str = ToString(10000000000ULL + (int64_t)calfact);
+        str = ToString(10000000000ULL + (int64_t)calfact_x10/10LL);
         Serial.print(str);
 
         Serial.print(F(" corr="));
         int e = 0;
-        float f = ((float)(calfact - prev_calfact))/10000000000.0;
+        float f = ((float)(calfact_x10 - prev_calfact_x10))/100000000000.0;
         while (f != 0.0 && fabs(f) < 1.0) {
           f *= 10.0;
           e--;
@@ -474,7 +473,7 @@ void loop()
         Serial.print(F("e"));
         Serial.print(e);
 
-        prev_calfact = calfact;
+        prev_calfact_x10 = calfact_x10;
 #endif
         if (target_freq!=actual_freq) {
           Serial.print(F(" Freq_Error = "));
@@ -498,14 +497,15 @@ void LCDmeasdif(int good)
           displ_setCursor(0,1);
           if (alarm)
             displ.print(F("> ")); 
-          if (measdif > 0) displ.print(F(" ")); 
-          if (abs(measdif) < 100) displ.print(F(" ")); 
-          if (abs(measdif) < 10) displ.print(F(" ")); 
-          displ.print(measdif);
+          if (measdif_x10 > 0) displ.print(F(" ")); 
+          if (abs(measdif_x10) < 1000) displ.print(F(" ")); 
+          if (abs(measdif_x10) < 100) displ.print(F(" ")); 
+          if (abs(measdif_x10) < 10) displ.print(F(" ")); 
+          displ.print(measdif_x10);
           displ.print(F(" ")); 
           displ.print(duration); 
           displ.print(F("s ")); 
-          displ.print(calfact);
+          displ.print(calfact_x10);
 }          
 
 //***************************************
