@@ -339,7 +339,7 @@ void loop()
         if (p_delta_max > 10 && p_delta_average > 4.0) {
           p_delta_max /= 2;
         }
-        if (p_delta_max < 40 && p_delta_average < 1.0) {
+        if (p_delta_max < 80 && p_delta_average < 1.0) {
           p_delta_max *= 2;
           while (target_duration < p_delta_max)
             target_duration *= 2;
