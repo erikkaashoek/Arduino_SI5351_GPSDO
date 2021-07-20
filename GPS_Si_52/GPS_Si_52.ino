@@ -1,5 +1,4 @@
-/* A Time Base using a GPS controlled SI5351A Adafruit board to generate 10 MHz, 26 MHz or any other frequency up to 110 MHz.
-Permission is granted to use, copy, modify, and distribute this software and documentation for non-commercial purposes. 
+/*Permission is granted to use, copy, modify, and distribute this software and documentation for non-commercial purposes. 
 (F2DC 17 April 2017)
 
 I was greatly helped by the works of Gene Marcus W3PM, Jason Milldrum NT7S-Dana H. Myers K6JQ, Igor Gonzales Martin and many others.
@@ -105,6 +104,7 @@ int p_delta_count = 0;
 int p_delta_max = 10;
 int p_delta_sum = 0;
 
+int dump_phase = false;
 
 // Define SI5351A register addresses
 #define CLK_ENABLE_CONTROL       3
@@ -171,6 +171,12 @@ ready:
         p_delta_count++;
       }
     }
+  }
+  if (dump_phase) {
+        Serial.print(F("phase="));
+        Serial.print(phase);
+        Serial.print(F(" delta="));
+        Serial.println(p_delta);
   }
   if(validGPSflag == 1) //Start the UTC timekeeping process
   {
@@ -310,6 +316,16 @@ void setup()
 
   target_count=CAL_FREQ*duration;
 }
+
+char testKey()
+{
+  if(Serial.available() > 0)   // see if incoming serial data:
+  {
+    return(Serial.read());  // read oldest byte in serial buffer:
+  }
+  return(0);
+}
+
 //******************************************************************
 // Loop 
 void loop()
@@ -318,6 +334,10 @@ void loop()
   int lock = 0; 
   String str = "";
   int64_t target_freq,actual_freq;
+  char c = testKey();
+  if (c == 'p') {
+    dump_phase = !dump_phase;
+  }
   if (validGPSflag == 0) GPSprocess( ); //If GPS is selected, wait for valid NMEA data
   else
   {    
