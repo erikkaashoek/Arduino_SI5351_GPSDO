@@ -154,7 +154,7 @@ void PPSinterrupt()
   if (tcount == start) // Start counting the 2.5 MHz signal from SI5351A CLK0
   {
     TCCR1B = 7;    //Clock on rising edge of pin 5
-  } else if (tcount == target_duration + start || (tcount > start  && TEST) ) //Stop the counter : the 40 second gate time is elapsed
+  } else if (tcount == target_duration + start || (tcount > start  && TEST) ) //Stop the counter : the target_duration gate time is elapsed
   {     
     TCCR1B = 0;      //Turn off counter
     measured_count = TCNT1;   //measured_count is the number of pulses counted during duration PPS.
@@ -172,9 +172,9 @@ void PPSinterrupt()
     p_delta = phase - prev_phase;
     prev_phase = phase;
 
-    if (p_delta_count < p_delta_max) {
-      if (abs(p_delta)<250) {
-        if (p_delta_count == 0)
+    if (p_delta_count < p_delta_max) {          // Result available when p_delta_count == p_delta_max
+      if (abs(p_delta)<250) {                   // Valid phase measurement, this to prevent phase wrapping
+        if (p_delta_count == 0)                 // Reset sum 
           p_delta_sum = 0;
         p_delta_sum += p_delta;
         p_delta_count++;
@@ -228,7 +228,6 @@ void PPSinterrupt()
   if (blink_alarm) {
     alarm_led = !alarm_led;
     digitalWrite(ALARM_LED, alarm_led);
-
   }
   if (blink_lock) {
     lock_led = !lock_led;
@@ -236,11 +235,11 @@ void PPSinterrupt()
   }
 }
 
-// Timer 1 overflow intrrupt vector.
+// Timer 1 overflow interrupt vector.
 ISR(TIMER1_OVF_vect) 
 {
   mult++;        //Increment overflow multiplier
-  TIFR1 = (1<<TOV1);  //Clear overlow flag by shifting left 
+  TIFR1 = (1<<TOV1);  //Clear overflow flag by shifting left 
 }
 
 String ToString(int64_t x)    // Very clumsy conversion of 64 bit numbers
@@ -348,6 +347,7 @@ char testKey()
 // Loop 
 void loop()
 {
+  int update = false;
   int phase_locked = false;
   int lock = 0; 
   String str = "";
@@ -356,182 +356,170 @@ void loop()
   if (c == 'p') {
     dump_phase = !dump_phase;
   }
-  if (validGPSflag == 0) GPSprocess( ); //If GPS is selected, wait for valid NMEA data
-  else
-  {    
-    if (USE_PHASE_DETECTOR && target_duration >= PLL_START_DURATION) {
-      if (p_delta_count == p_delta_max /* || (p_delta_count > 10 && fabs((float)p_delta_sum / (float)p_delta_count ) > 10)*/) {
-        p_delta_average = (float)p_delta_sum / (float)p_delta_count;
-        p_delta_count = 0;
-        tcount = 0;
-        Serial.print(hour);
-        Serial.print(F(":"));
-        if (minute < 10) Serial.print(F("0"));
-        Serial.print(minute);
-        Serial.print(F(":"));
-        if (second < 10) Serial.print(F("0"));
-        Serial.print(second);
-        Serial.print(F(" dur="));
-        Serial.print(p_delta_max); 
+  if (validGPSflag == 0) 
+    GPSprocess( ); //If GPS is selected, wait for valid NMEA data
+  else if (USE_PHASE_DETECTOR && target_duration >= PLL_START_DURATION && p_delta_count == p_delta_max) {
+    p_delta_average = (float)p_delta_sum / (float)p_delta_count;
+    p_delta_count = 0;                  // Restart phase measurement
+    tcount = 0;                         // Restart pulse counter
+    if (p_delta_max > 10 && fabs(p_delta_average) > 4.0) {
+      p_delta_max /= 2;
+    }
+    if (p_delta_max < 200 && fabs(p_delta_average) < 1.0) {
+      p_delta_max *= 2;
+      while (target_duration < p_delta_max)
+        target_duration *= 2;
+    }
+    if (fabs(p_delta_average) < 10.0)
+      measdif_x10 = -p_delta_average*20;      // Half speed to avoid overcompensations
+    else
+      measdif_x10 = -p_delta_average*40;
+    if (fabs(p_delta_average) < 1.0) {
+      blink_lock = false;
+      digitalWrite(LOCK_LED,HIGH);   // final lock
+    }
+    else
+      blink_lock = true;
+    phase_locked = true;
+    update = true;
+  } else if(available) // Frequency calculation data available                                   
+  {
+    p_delta_count = 0;  // Restart phase measurement
+    available = 0;
+    if (measured_count-target_count >= 0)               
+      measdif_x10 =(int32_t)((measured_count-target_count) * MAX_TIME  / duration)*10 * 4000/MAX_TIME + SMALL_STEP; // PPB Error calculation          
+    else
+      measdif_x10 =(int32_t)((measured_count+1-target_count) * MAX_TIME  / duration)*10  * 4000/MAX_TIME  - SMALL_STEP; // PPB Error calculation           
 
-        Serial.print(F(" p_average="));
-        Serial.print(p_delta_average); 
-        Serial.print(F(" dummy=0"));
-        if (p_delta_max > 10 && fabs(p_delta_average) > 4.0) {
-          p_delta_max /= 2;
-        }
-        if (p_delta_max < 200 && fabs(p_delta_average) < 1.0) {
-          p_delta_max *= 2;
-          while (target_duration < p_delta_max)
-            target_duration *= 2;
-        }
-        if (fabs(p_delta_average) < 10.0)
-          measdif_x10 = p_delta_average*20;      // Half speed to avoid overcompensations
-        else
-          measdif_x10 = p_delta_average*40;
-        if (fabs(p_delta_average) < 1.0) {
-          blink_lock = false;
-          digitalWrite(LOCK_LED,HIGH);   // final lock
-        }
-        else
-          blink_lock = true;
-        phase_locked = true;
-        goto update;
-      }
-    } else
-      p_delta_count = 0;
-    if(available) // Frequency calculation data available                                   
+#if 0
+    if(measdif_x10<-5000000 || measdif_x10>+5000000) // Impossible error, alarm, not used
     {
-      available = 0;
-      if (measured_count-target_count >= 0)               
-        measdif_x10 =(int32_t)((measured_count-target_count) * MAX_TIME  / duration)*10 * 4000/MAX_TIME + SMALL_STEP; // PPB Error calculation          
-      else
-        measdif_x10 =(int32_t)((measured_count+1-target_count) * MAX_TIME  / duration)*10  * 4000/MAX_TIME  - SMALL_STEP; // PPB Error calculation           
-#if 0
-      if(measdif_x10<-5000000 || measdif_x10>+5000000) // Impossible error, alarm, not used
-      {
-        blink_alarm = true;
-        Serial.print(F("Alarm "));
-        alarm = 1;
-        target_duration /= 2;
-        if (target_duration == 0)
-          target_duration = 1;
-
-      }
-      else  
-#endif
-      {
-        blink_alarm = false;
-        alarm = 0;
-        if(abs(measdif_x10) < SMALL_STEP*2) // Within threshold, increase duration
-        {
-          lock = 1;
-          target_duration = duration * 2;
-          if (target_duration > MAX_TIME)
-            target_duration = MAX_TIME;
-        }
-
-        if (target_duration < PLL_START_DURATION || !phase_locked) {   // Not yet in phase detection mode
-          if(abs(measured_count -target_count) > 10) // Too large, increase speed
-          {
-            target_duration = duration / 2;
-            if (target_duration == 0)
-              target_duration = 1;
-          }
-        }
-      update:
-        calfact_x10=calfact_x10 - measdif_x10; // compute the new calfact
-        LCDmeasdif(); // Call the display Error E (measdif) routine
-        target_freq = 10000000000;
-        XtalFreq_x1000 = INITIAL_XTAL - calfact_x10/4;
-
-        // 
-        // This routine searches the best combination of PLL and fractional divider settings to minimize the frequency error
-        uint32_t a,b,c, f_a=36,f_b=0,f_c;
-        f_c = c = 1048575UL - 10000UL;
-        uint32_t delta = 100000000;
-
-        if (SEARCH_OPTIMUM)         // XTAL drifts when changing VCO PLL settings so skip
-        {
-          for (a = 24; a<=36; a++) {
-            for (b = 524287UL; b <524303UL; b++) {
-              SI5351aActualPLLFreq(a,b,c);
-              actual_freq = SI5351aActualFreq(target_freq);
-              if (abs(actual_freq - target_freq) < delta) {
-                delta = abs(actual_freq - target_freq);
-                f_a = a;
-                f_b = b;
-                f_c = c;
-              }
-            }
-          }
-        }
-        SI5351aActualPLLFreq(f_a,f_b,f_c);
-        SI5351aSetPLLFreq(f_a,f_b,f_c);
-#if 0
-        Serial.print(F("a,b,c="));
-        Serial.print(f_a);
-        Serial.print(F(","));
-        Serial.print(f_b);
-        Serial.print(F(","));
-        Serial.print(f_c);
-        Serial.println();
-#endif
-        SI5351aSetFreq(SYNTH_MS_1,target_freq,2);  // 2.5MHz
-        actual_freq=SI5351aSetFreq(SYNTH_MS_0,target_freq,0);    // 10MHz
-        p_delta_count = 0;
-        p_delta_sum = 0;
-        p_delta_average = 0.0;
-      }
-
-      String str;
-      if (!phase_locked) {
-        Serial.print(hour);
-        Serial.print(F(":"));
-        if (minute < 10) Serial.print(F("0"));
-        Serial.print(minute);
-        Serial.print(F(":"));
-        if (second < 10) Serial.print(F("0"));
-        Serial.print(second);
-
-        Serial.print(F(" dur="));
-        Serial.print(duration); 
-        //          Serial.print(F(" tcount=")); str = ToString(target_count);  Serial.print(str);
-        Serial.print(F(" acount=")); str = ToString(measured_count);  Serial.print(str);
-        Serial.print(F(" dcount="));
-        Serial.print((int)(measured_count -target_count));
-      }
-#if 1
-      Serial.print(F(" calfact="));
-      Serial.print(calfact_x10);
-      Serial.print(F(" freq="));
-      str = ToString(10000000000ULL + (int64_t)calfact_x10/10LL);
-      Serial.print(str);
-
-      Serial.print(F(" corr="));
-      int e = 0;
-      float f = ((float)(calfact_x10 - prev_calfact_x10))/100000000000.0;
-      while (f != 0.0 && fabs(f) < 1.0) {
-        f *= 10.0;
-        e--;
-      }
-      Serial.print(f,1);
-      Serial.print(F("e"));
-      Serial.print(e);
-
-      prev_calfact_x10 = calfact_x10;
-#endif
-      if (target_freq!=actual_freq) {
-        Serial.print(F(" Freq_Error = "));
-        Serial.print((int)(target_freq-actual_freq));
-      }
-      if (lock) 
-        Serial.println(F(" Lock"));
-      else
-        Serial.println(F(" "));
+      blink_alarm = true;
+      Serial.print(F("Alarm "));
+      alarm = 1;
+      target_duration /= 2;
+      if (target_duration == 0)
+        target_duration = 1;
 
     }
-  } 
+    else  
+#endif
+    {
+      blink_alarm = false;
+      alarm = 0;
+      if(abs(measdif_x10) < SMALL_STEP*2) // Within threshold, increase duration
+      {
+        lock = 1;
+        target_duration = duration * 2;
+        if (target_duration > MAX_TIME)
+          target_duration = MAX_TIME;
+      }
+
+      if (target_duration < PLL_START_DURATION || !phase_locked) {   // Not yet in phase detection mode
+        if(abs(measured_count -target_count) > 10) // Too large, increase speed
+        {
+          target_duration = duration / 2;
+          if (target_duration == 0)
+            target_duration = 1;
+        }
+      }
+      update = true;
+
+    }
+  }
+  if (update) {
+    calfact_x10=calfact_x10 - measdif_x10; // compute the new calfact
+    LCDmeasdif(); // Call the display Error E (measdif) routine
+    target_freq = 10000000000;
+    XtalFreq_x1000 = INITIAL_XTAL - calfact_x10/4;
+
+    // 
+    // This routine searches the best combination of PLL and fractional divider settings to minimize the frequency error
+    uint32_t a,b,c, f_a=36,f_b=0,f_c;
+    f_c = c = 1048575UL - 10000UL;
+    uint32_t delta = 100000000;
+
+    if (SEARCH_OPTIMUM)         // XTAL drifts when changing VCO PLL settings so skip
+    {
+      for (a = 24; a<=36; a++) {
+        for (b = 524287UL; b <524303UL; b++) {
+          SI5351aActualPLLFreq(a,b,c);
+          actual_freq = SI5351aActualFreq(target_freq);
+          if (abs(actual_freq - target_freq) < delta) {
+            delta = abs(actual_freq - target_freq);
+            f_a = a;
+            f_b = b;
+            f_c = c;
+          }
+        }
+      }
+    }
+    SI5351aActualPLLFreq(f_a,f_b,f_c);
+    SI5351aSetPLLFreq(f_a,f_b,f_c);
+#if 0
+    Serial.print(F("a,b,c="));
+    Serial.print(f_a);
+    Serial.print(F(","));
+    Serial.print(f_b);
+    Serial.print(F(","));
+    Serial.print(f_c);
+    Serial.println();
+#endif
+    SI5351aSetFreq(SYNTH_MS_1,target_freq,2);  // 2.5MHz
+    actual_freq=SI5351aSetFreq(SYNTH_MS_0,target_freq,0);    // 10MHz
+    p_delta_count = 0;
+    //    p_delta_sum = 0;
+    //    p_delta_average = 0.0;
+  }
+  if (update) {
+  Serial.print(hour);
+  Serial.print(F(":"));
+  if (minute < 10) Serial.print(F("0"));
+  Serial.print(minute);
+  Serial.print(F(":"));
+  if (second < 10) Serial.print(F("0"));
+  Serial.print(second);
+  Serial.print(F(" dur="));
+
+  if (phase_locked) {
+    Serial.print(p_delta_max); 
+    Serial.print(F(" p_average=")); Serial.print(p_delta_average); 
+    Serial.print(F(" dummy=0"));
+  } else {
+    Serial.print(duration); 
+    //          Serial.print(F(" tcount=")); str = ToString(target_count);  Serial.print(str);
+    Serial.print(F(" acount=")); str = ToString(measured_count);  Serial.print(str);
+    Serial.print(F(" dcount=")); Serial.print((int)(measured_count -target_count));
+  }
+
+  Serial.print(F(" calfact="));
+  Serial.print(calfact_x10);
+  Serial.print(F(" freq="));
+  str = ToString(10000000000ULL + (int64_t)calfact_x10/10LL);
+  Serial.print(str);
+
+  Serial.print(F(" corr="));
+  int e = 0;
+  float f = ((float)(calfact_x10 - prev_calfact_x10))/100000000000.0;
+  while (f != 0.0 && fabs(f) < 1.0) {
+    f *= 10.0;
+    e--;
+  }
+  Serial.print(f,1);
+  Serial.print(F("e"));
+  Serial.print(e);
+
+  prev_calfact_x10 = calfact_x10;
+
+  if (target_freq!=actual_freq) {
+    Serial.print(F(" Freq_Error = "));
+    Serial.print((int)(target_freq-actual_freq));
+  }
+  if (lock) 
+    Serial.println(F(" Lock"));
+  else
+    Serial.println(F(" "));
+  }
 }
 
 //************************************
