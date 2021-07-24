@@ -19,7 +19,7 @@ SW modified by Erik Kaashoek to allow for longer measurement times enabling more
 #include <Wire.h>
 
 //#define OLED
-#define LCD
+//#define LCD
 #ifdef LCD
 #include <LiquidCrystal.h>
 #endif
@@ -34,23 +34,30 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 #endif
 
 #ifdef LCD
-#define displ lcd
+#define displ_print lcd.print
 #define displ_setCursor(X,Y) lcd.setCursor(X, Y)
 #else
-#define displ display
+#ifdef OLED
+#define displ_print display.print
 #define displ_setCursor(X,Y) displ.setCursor(X*10, Y*32)
+#else
+#endif
+#define displ_print(X)
+#define displ_setCursor(X,Y)
 #endif
 
 // Set up MCU pins
 #define ppsPin                   2 // from GPS 
-#define FreqAlarm                3 // LED Alarm XtalFreq
+#define ALARM_LED                3 // LED Alarm XtalFreq
+#define LOCK_LED                 4
+#ifdef lcd
 #define RS                       7 // LCD RS
 #define E                        8 // LCD Enable
 #define DB4                      9 // LCD DB4
 #define DB5                     10 // LCD DB5
 #define DB6                     11 // LCD DB6
 #define DB7                     12 // LCD DB7
-#define FreqSelect               4 // Choice between 10MHZ (or another frequency) and F=26 MHz
+#endif
 
 #define USE_PHASE_DETECTOR  true        // Set to false if the XTAL is too unstable to phase lock
 #define SEARCH_OPTIMUM      true       // Set to true if a stable TCXO is used for the SI5351, should be false when not using the phase detector
@@ -113,6 +120,12 @@ int p_delta_max = 10;
 int p_delta_sum = 0;
 
 int dump_phase = false;
+
+int alarm_led = true;
+int lock_led = false;
+int blink_alarm = false;
+int blink_lock = false;
+
 
 // Define SI5351A register addresses
 #define CLK_ENABLE_CONTROL       3
@@ -191,26 +204,35 @@ void PPSinterrupt()
     if (hour == 24) hour=0;
     displ_setCursor(0,0);
 #if 0
-    if (phase < 100) displ.print (F(" "));
-    if (phase < 10) displ.print (F(" "));
-    displ.print(phase);
+    if (phase < 100) displ_print (F(" "));
+    if (phase < 10) displ_print (F(" "));
+    displ_print(phase);
 #endif
     if (p_delta >= 0)
-      displ.print(F(" "));
-    if (abs(p_delta) < 100) displ.print (F(" "));
-    if (abs(p_delta) < 10) displ.print (F(" "));
-    displ.print(p_delta);
-    //    displ.print(F("     "));    
+      displ_print(F(" "));
+    if (abs(p_delta) < 100) displ_print (F(" "));
+    if (abs(p_delta) < 10) displ_print (F(" "));
+    displ_print(p_delta);
+    //    displ_print(F("     "));    
     displ_setCursor(7,0); // LCD cursor on the right part of Line 0
-    if (hour < 10) displ.print (F("0"));
-    displ.print (hour);
-    displ.print (F(":"));
-    if (minute < 10) displ.print (F("0"));
-    displ.print (minute);
-    displ.print (F(":"));
-    if (second < 10) displ.print (F("0"));
-    displ.print (second);
-    //   displ.print (F("Z"));  // UTC Time Indicator
+    if (hour < 10) displ_print (F("0"));
+    displ_print (hour);
+    displ_print (F(":"));
+    if (minute < 10) displ_print (F("0"));
+    displ_print (minute);
+    displ_print (F(":"));
+    if (second < 10) displ_print (F("0"));
+    displ_print (second);
+    //   displ_print (F("Z"));  // UTC Time Indicator
+  }
+  if (blink_alarm) {
+    alarm_led = !alarm_led;
+    digitalWrite(ALARM_LED, alarm_led);
+
+  }
+  if (blink_lock) {
+    lock_led = !lock_led;
+    digitalWrite(LOCK_LED, lock_led);
   }
 }
 
@@ -254,8 +276,8 @@ void setup()
   Serial.begin(9600);  // Define the GPS port speed
   Wire.begin(1);    // I2C bus address = 1
   SI5351aStart();  
-  SI5351aSetFreq(SYNTH_MS_0,10000000000LL,2);     // 10MHz, divide by 4
-  SI5351aSetFreq(SYNTH_MS_1, 10000000000LL,0);    // 10MHz
+  SI5351aSetFreq(SYNTH_MS_1,10000000000LL,2);     // 10MHz, divide by 4
+  SI5351aSetFreq(SYNTH_MS_0, 10000000000LL,0);    // 10MHz
   //  SI5351_write(CLK_ENABLE_CONTROL,0b00000100); // Turn OFF CLK2, not used
   //  SI5351_write(CLK_ENABLE_CONTROL,0b00000000); // Turn ON CLK2, not used
 
@@ -266,7 +288,6 @@ void setup()
   TIFR1  = 1;     //Reset overflow
   TIMSK1 = 1;     //Turn on overflow flag
 
-  pinMode(FreqAlarm, OUTPUT); // Alarm LED for weird measured_count
   // Set up the LCD's number of columns and rows 
 #ifdef LCD
 
@@ -287,18 +308,20 @@ void setup()
   pinMode(ppsPin, INPUT);
   analogReference(INTERNAL);
   displ_setCursor(0,1);
-  displ.print(F(" F2DC V.5.2")); // display version number on the LCD
+  displ_print(F(" F2DC V.5.2")); // display version number on the LCD
   delay(1000);
 
   // Set up IO switches
-  pinMode(FreqSelect, INPUT);  // Initialize the frequency select pin, not used
-  digitalWrite(FreqSelect, HIGH); // internal pLL-up enabled , not used
+  pinMode(ALARM_LED, OUTPUT); // Alarm LED for weird measured_count
+  digitalWrite(ALARM_LED, HIGH);
+  pinMode(LOCK_LED, OUTPUT);  // Lock lED
+  digitalWrite(LOCK_LED, LOW);
 
   // Set Arduino D2 for external interrupt input on the rising edge of GPS 1PPS
   attachInterrupt(0, PPSinterrupt, RISING);  
 
   displ_setCursor(0,1);
-  displ.print(F("Waiting for GPS"));
+  displ_print(F("Waiting for GPS"));
   Serial.println(F("Waiting for GPS"));
 
 
@@ -339,6 +362,8 @@ void loop()
     if (USE_PHASE_DETECTOR && target_duration >= PLL_START_DURATION) {
       if (p_delta_count == p_delta_max /* || (p_delta_count > 10 && fabs((float)p_delta_sum / (float)p_delta_count ) > 10)*/) {
         p_delta_average = (float)p_delta_sum / (float)p_delta_count;
+        p_delta_count = 0;
+        tcount = 0;
         Serial.print(hour);
         Serial.print(F(":"));
         if (minute < 10) Serial.print(F("0"));
@@ -352,11 +377,10 @@ void loop()
         Serial.print(F(" p_average="));
         Serial.print(p_delta_average); 
         Serial.print(F(" dummy=0"));
-        p_delta_count = 0;
-        if (p_delta_max > 10 && p_delta_average > 4.0) {
+        if (p_delta_max > 10 && fabs(p_delta_average) > 4.0) {
           p_delta_max /= 2;
         }
-        if (p_delta_max < 200 && p_delta_average < 1.0) {
+        if (p_delta_max < 200 && fabs(p_delta_average) < 1.0) {
           p_delta_max *= 2;
           while (target_duration < p_delta_max)
             target_duration *= 2;
@@ -365,9 +389,12 @@ void loop()
           measdif_x10 = p_delta_average*20;      // Half speed to avoid overcompensations
         else
           measdif_x10 = p_delta_average*40;
-        calfact_x10 += measdif_x10;
-        LCDmeasdif(true); // display E (measdif) on the LCD
-        tcount = 0;
+        if (fabs(p_delta_average) < 1.0) {
+          blink_lock = false;
+          digitalWrite(LOCK_LED,HIGH);   // final lock
+        }
+        else
+          blink_lock = true;
         phase_locked = true;
         goto update;
       }
@@ -383,10 +410,9 @@ void loop()
 #if 0
       if(measdif_x10<-5000000 || measdif_x10>+5000000) // Impossible error, alarm, not used
       {
-        digitalWrite(FreqAlarm,LOW);   // measured_count OK : turn the LED OFF 
+        blink_alarm = true;
         Serial.print(F("Alarm "));
         alarm = 1;
-        LCDmeasdif(false); // display E (measdif) on the LCD
         target_duration /= 2;
         if (target_duration == 0)
           target_duration = 1;
@@ -395,11 +421,10 @@ void loop()
       else  
 #endif
       {
-        digitalWrite(FreqAlarm,LOW);   // measured_count OK : turn the LED OFF 
+        blink_alarm = false;
         alarm = 0;
         if(abs(measdif_x10) < SMALL_STEP*2) // Within threshold, increase duration
         {
-          LCDmeasdif(true); // display E (measdif) on the LCD
           lock = 1;
           target_duration = duration * 2;
           if (target_duration > MAX_TIME)
@@ -407,8 +432,6 @@ void loop()
         }
 
         if (target_duration < PLL_START_DURATION || !phase_locked) {   // Not yet in phase detection mode
-          calfact_x10=calfact_x10 - measdif_x10; // compute the new calfact
-          LCDmeasdif(false); // Call the display Error E (measdif) routine
           if(abs(measured_count -target_count) > 10) // Too large, increase speed
           {
             target_duration = duration / 2;
@@ -416,7 +439,9 @@ void loop()
               target_duration = 1;
           }
         }
-        update:
+      update:
+        calfact_x10=calfact_x10 - measdif_x10; // compute the new calfact
+        LCDmeasdif(); // Call the display Error E (measdif) routine
         target_freq = 10000000000;
         XtalFreq_x1000 = INITIAL_XTAL - calfact_x10/4;
 
@@ -452,8 +477,8 @@ void loop()
         Serial.print(f_c);
         Serial.println();
 #endif
-        SI5351aSetFreq(SYNTH_MS_0,target_freq,2);  // 2.5MHz
-        actual_freq=SI5351aSetFreq(SYNTH_MS_1,target_freq,0);    // 10MHz
+        SI5351aSetFreq(SYNTH_MS_1,target_freq,2);  // 2.5MHz
+        actual_freq=SI5351aSetFreq(SYNTH_MS_0,target_freq,0);    // 10MHz
         p_delta_count = 0;
         p_delta_sum = 0;
         p_delta_average = 0.0;
@@ -511,22 +536,22 @@ void loop()
 
 //************************************
 // Display on the LCD the difference E between measured CLK0 and theoretical 100e6 
-void LCDmeasdif(int good)
+void LCDmeasdif()
 {
   displ_setCursor(0,1);
-  displ.print(F("                "));
+  displ_print(F("                "));
   displ_setCursor(0,1);
   if (alarm)
-    displ.print(F("> ")); 
-  if (measdif_x10 > 0) displ.print(F(" ")); 
-  if (abs(measdif_x10) < 1000) displ.print(F(" ")); 
-  if (abs(measdif_x10) < 100) displ.print(F(" ")); 
-  if (abs(measdif_x10) < 10) displ.print(F(" ")); 
-  displ.print(measdif_x10);
-  displ.print(F(" ")); 
-  displ.print(duration); 
-  displ.print(F("s ")); 
-  displ.print(calfact_x10);
+    displ_print(F("> ")); 
+  if (measdif_x10 > 0) displ_print(F(" ")); 
+  if (abs(measdif_x10) < 1000) displ_print(F(" ")); 
+  if (abs(measdif_x10) < 100) displ_print(F(" ")); 
+  if (abs(measdif_x10) < 10) displ_print(F(" ")); 
+  displ_print(measdif_x10);
+  displ_print(F(" ")); 
+  displ_print(duration); 
+  displ_print(F("s ")); 
+  displ_print(calfact_x10);
 }          
 
 //***************************************
@@ -584,7 +609,7 @@ void GPSprocess(void)
         {
           validGPSflag = 1; 
           displ_setCursor(0,1);
-          displ.print(F("               "));
+          displ_print(F("               "));
         }             
         else
         {
