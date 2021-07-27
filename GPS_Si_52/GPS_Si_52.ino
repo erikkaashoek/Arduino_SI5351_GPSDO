@@ -50,6 +50,7 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 #define ppsPin                   2 // from GPS 
 #define ALARM_LED                3 // LED Alarm XtalFreq
 #define LOCK_LED                 4
+#define OPEN_LOOP                6 
 #ifdef lcd
 #define RS                       7 // LCD RS
 #define E                        8 // LCD Enable
@@ -61,7 +62,7 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
 #define USE_PHASE_DETECTOR  true        // Set to false if the XTAL is too unstable to phase lock
 #define SEARCH_OPTIMUM      true       // Set to true if a stable TCXO is used for the SI5351, should be false when not using the phase detector
-#define PLL_START_DURATION  30          // Start using phase when duration exceeds this.
+#define PLL_START_DURATION  20          // Start using phase when duration exceeds this.
 
 int64_t PLLFReq_x1000 = 900000000000LL;  // In 1/1000 Hz, will be update to actual frequency
 
@@ -116,7 +117,7 @@ int p_delta = 0;
 volatile int tick = 0;
 float p_delta_average = 0;
 int p_delta_count = 0;
-int p_delta_max = 10;
+int p_delta_max = PLL_START_DURATION;
 int p_delta_sum = 0;
 
 int dump_phase = false;
@@ -315,6 +316,7 @@ void setup()
   digitalWrite(ALARM_LED, HIGH);
   pinMode(LOCK_LED, OUTPUT);  // Lock lED
   digitalWrite(LOCK_LED, LOW);
+  pinMode(OPEN_LOOP, INPUT_PULLUP ); // Alarm LED for weird measured_count
 
   // Set Arduino D2 for external interrupt input on the rising edge of GPS 1PPS
   attachInterrupt(0, PPSinterrupt, RISING);  
@@ -362,7 +364,7 @@ void loop()
     p_delta_average = (float)p_delta_sum / (float)p_delta_count;
     p_delta_count = 0;                  // Restart phase measurement
     tcount = 0;                         // Restart pulse counter
-    if (p_delta_max > 10 && fabs(p_delta_average) > 4.0) {
+    if (p_delta_max > PLL_START_DURATION*2 && fabs(p_delta_average) > 4.0) {
       p_delta_max /= 2;
     }
     if (p_delta_max < 200 && fabs(p_delta_average) < 1.0) {
@@ -370,11 +372,11 @@ void loop()
       while (target_duration < p_delta_max)
         target_duration *= 2;
     }
-    if (fabs(p_delta_average) < 10.0)
+    if (fabs(p_delta_average) < 20.0)
       measdif_x10 = -p_delta_average*20;      // Half speed to avoid overcompensations
     else
       measdif_x10 = -p_delta_average*40;
-    if (fabs(p_delta_average) < 1.0) {
+    if (fabs(p_delta_average) < 5.0) {
       blink_lock = false;
       digitalWrite(LOCK_LED,HIGH);   // final lock
     }
@@ -384,6 +386,7 @@ void loop()
     update = true;
   } else if(available) // Frequency calculation data available                                   
   {
+    digitalWrite(ALARM_LED, LOW);
     p_delta_count = 0;  // Restart phase measurement
     available = 0;
     if (measured_count-target_count >= 0)               
@@ -427,11 +430,11 @@ void loop()
 
     }
   }
-  if (update) {
+  if (update && ! digitalRead(OPEN_LOOP) && ((SEARCH_OPTIMUM /* &&  abs(measdif_x10) > 3 */)|| abs(measdif_x10) > 300 )) {
     calfact_x10=calfact_x10 - measdif_x10; // compute the new calfact
     LCDmeasdif(); // Call the display Error E (measdif) routine
     target_freq = 10000000000;
-    XtalFreq_x1000 = INITIAL_XTAL - calfact_x10/4;
+    XtalFreq_x1000 = INITIAL_XTAL - (INITIAL_XTAL / 10000000LL ) * calfact_x10/ 10000LL;     // calfact is versus 10MHz in 1/1000 Hz
 
     // 
     // This routine searches the best combination of PLL and fractional divider settings to minimize the frequency error
@@ -441,6 +444,7 @@ void loop()
 
     if (SEARCH_OPTIMUM)         // XTAL drifts when changing VCO PLL settings so skip
     {
+      SI5351_write(CLK_ENABLE_CONTROL,0b00000111); // Turn OFF all output
       for (a = 24; a<=36; a++) {
         for (b = 524287UL; b <524303UL; b++) {
           SI5351aActualPLLFreq(a,b,c);
@@ -456,6 +460,7 @@ void loop()
     }
     SI5351aActualPLLFreq(f_a,f_b,f_c);
     SI5351aSetPLLFreq(f_a,f_b,f_c);
+    actual_freq = SI5351aActualFreq(target_freq);
 #if 0
     Serial.print(F("a,b,c="));
     Serial.print(f_a);
@@ -467,6 +472,9 @@ void loop()
 #endif
     SI5351aSetFreq(SYNTH_MS_1,target_freq,2);  // 2.5MHz
     actual_freq=SI5351aSetFreq(SYNTH_MS_0,target_freq,0);    // 10MHz
+
+    if (SEARCH_OPTIMUM)
+      SI5351_write(CLK_ENABLE_CONTROL,0b00000100); // Turn ON CLK0 and CLK1
     p_delta_count = 0;
     //    p_delta_sum = 0;
     //    p_delta_average = 0.0;
@@ -494,8 +502,9 @@ void loop()
 
   Serial.print(F(" calfact="));
   Serial.print(calfact_x10);
-  Serial.print(F(" freq="));
-  str = ToString(10000000000ULL + (int64_t)calfact_x10/10LL);
+  Serial.print(F(" xtal="));
+  str = ToString( SI5351aActualFreq(XtalFreq_x1000) );
+//  str = ToString(10000000000ULL + (int64_t)calfact_x10/10LL);
   Serial.print(str);
 
   Serial.print(F(" corr="));
@@ -515,6 +524,8 @@ void loop()
     Serial.print(F(" Freq_Error = "));
     Serial.print((int)(target_freq-actual_freq));
   }
+  if (digitalRead(OPEN_LOOP))
+    Serial.print(F(" OPEN"));
   if (lock) 
     Serial.println(F(" Lock"));
   else
