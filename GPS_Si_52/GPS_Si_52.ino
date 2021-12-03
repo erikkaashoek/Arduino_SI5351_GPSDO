@@ -1,3 +1,5 @@
+//#include <TimeLib.h>
+
 /*Permission is granted to use, copy, modify, and distribute this software and documentation for non-commercial purposes. 
 (F2DC 17 April 2017)
 
@@ -18,7 +20,7 @@ SW modified by Erik Kaashoek to allow for longer measurement times enabling more
 #include <avr/io.h>
 #include <Wire.h>
 
-#include <EEPROM.h>
+//#include <EEPROM.h>
 
 //#define OLED
 //#define LCD
@@ -59,7 +61,7 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 #define ppsPin                   2 // from GPS 
 #define ALARM_LED                3 // LED Alarm XtalFreq
 #define LOCK_LED                 4
-#define OPEN_LOOP                8
+#define CLOSE_LOOP                8
 #define COUNT_PIN                5
 #define DAC_HIGH                6
 #define DAC_LOW                 7
@@ -74,15 +76,19 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 #endif
 
 #define USE_PHASE_DETECTOR  true        // Set to false if the XTAL is too unstable to phase lock
-#define SEARCH_OPTIMUM      false       // Set to true if a stable TCXO is used for the SI5351, should be false when not using the phase detector
+#define SEARCH_OPTIMUM      true       // Set to true if a stable TCXO is used for the SI5351, should be false when not using the phase detector
 
 #define MIN_DURATION        5
-#define PLL_START_DURATION  40       // Start using phase when duration exceeds this.
+#define PLL_START_DURATION  160       // Start using phase when duration exceeds this.
 int phase_start_duration = PLL_START_DURATION;
 #define  INITIAL_PLL 900000000000LL
 int64_t PLLFReq_x1000 = INITIAL_PLL;  // In 1/1000 Hz, will be update to actual frequency
-//#define INITIAL_XTAL 26000000000LL      // In 1/1000 Hz
+
+#ifdef DAC
 #define INITIAL_XTAL 10000000000LL      // In 1/1000 Hz
+#else
+#define INITIAL_XTAL 26000000000LL      // In 1/1000 Hz
+#endif
 int64_t XtalFreq_x1000 = INITIAL_XTAL;   
 
 #define A_START (600000000000LL / INITIAL_XTAL)
@@ -114,6 +120,9 @@ char StartCommand2[7] = "$GPRMC",buffer[300] = "";
 int IndiceCount=0,StartCount=0,counter=0,indices[13];
 int validGPSflag = 1;     // Set to 1 to avoid waiting for a valid GPS string in case no connection between GPS and Arduino
 int Chlength;
+#define second my_second
+#define minute my_minute
+#define hour my_hour
 int byteGPS=-1,second=0,minute=0,hour=0;
 int64_t mult=0;         // Count of overflows of 16 bit counter
 int alarm = 0;
@@ -127,7 +136,7 @@ int stable_count = 0;         // Count of consecutive measurements without corre
 
 
 long dac_out = 0;
-long  dac_manual = 0;
+long  dac_manual = -1;
 #if 0
 long dac_base = 30257;
 float dac_mult = 0.025;
@@ -137,15 +146,19 @@ long dac_base = DAC_RANGE/2 - 1;
 float dac_mult = 1;
 #endif
 
-#define MAX_CALFACT (DAC_RANGE/2)
-#define MIN_CALFACT (-DAC_RANGE/2)
-
+#ifdef DAC
+#define MAX_CALFACT (DAC_RANGE/2/dac_mult)
+#define MIN_CALFACT (-DAC_RANGE/2/dac_mult)
+#else
+#define MAX_CALFACT 1000000
+#define MIN_CALFACT -1000000
+#endif
 
 int32_t calfact_x10 =0;                 // Current correction factor in 1/100 Hz
 int32_t prev_calfact_x10 = 0;
 int64_t target_count,             // Target count of pulses
 measured_count;                 // Actual count of pulses
-
+int hold = false;
 volatile int phase = 0;
 float speed = 0;
 float phase_average = 0;
@@ -153,14 +166,17 @@ float prev_phase_average = 0;
 int prev_phase = 0;
 int phase_wrap = false;
 int p_delta = 0;
+int p_min = 40;
+int p_max = 783;
 volatile int tick = 0;
 float p_delta_average = 0;
 int phase_count = 0;
 int phase_count_max = PLL_START_DURATION;
 int p_delta_sum = 0;
 
-float high_gain =3.0e-7 / (float)256; // Minimum correction step of high DAC
-float gain = (float)3.0/(float)200000000.0 / (float)4096;  // Minimum correction step of low DAC
+float high_gain =2.0e-7 / (float)256; // Minimum correction step of high DAC
+float gain = 1e-8 / (float)4096;  // Minimum correction step of low DAC
+
 float corr = 0.0;
 float min_corr = 0.0;
 
@@ -171,7 +187,7 @@ int alarm_led = true;
 int lock_led = false;
 int blink_alarm = false;
 int blink_lock = false;
-
+volatile int phase_locked = false;
 
 // Define SI5351A register addresses
 #define CLK_ENABLE_CONTROL       3
@@ -187,7 +203,7 @@ int blink_lock = false;
 #define XTAL_LOAD_CAP          183
 int64_t SI5351aSetFreq(int synth, int64_t freq_x1000, int r_div);
 int64_t SI5351aActualFreq(int64_t freq_x1000);
-int64_t SI5351aSetPLLFreq(uint32_t a,uint32_t b,uint32_t c);
+int64_t SI5351aSetPLLFreq(int pll, uint32_t a,uint32_t b,uint32_t c);
 int64_t SI5351aActualPLLFreq(uint32_t a,uint32_t b,uint32_t c);
 
 
@@ -199,6 +215,8 @@ int64_t prev_high_count = 0;
 int64_t prev_count = 0;
 
 int64_t delta_count = 0;
+
+uint32_t secs, prev_secs;
 
 // Timer 1 overflow interrupt vector.
 ISR(TIMER1_OVF_vect) 
@@ -214,18 +232,19 @@ Called every second by GPS 1PPS on Arduino Nano D2
  */
 void PPSinterrupt()
 {
-  
+
   low_count = TCNT1;
   delta_count = (int64_t)low_count  - (int64_t)prev_low_count + (high_count - prev_high_count) * 0x10000LL;
   prev_high_count = high_count;
   prev_low_count = low_count;
-//  String str = ToString(delta_count);  Serial.println(str);
+  //  String str = ToString(delta_count);  Serial.println(str);
   if (!count_available) {
-    if (pulse_count == 0)
-      measured_count = 0;  // Add pulses
     pulse_count++;              // Increment the seconds counter
-    measured_count += delta_count;  // Add pulses
-    if (pulse_count >= target_duration) //Stop the counter : the target_duration gate time is elapsed
+    if (pulse_count == 1)
+      measured_count = 0;  // Reset pulses
+    else
+      measured_count += delta_count;  // Add pulses
+    if (pulse_count > target_duration) //Stop the counter : the target_duration gate time is elapsed
     {     
       duration = target_duration;
       target_count=((int64_t)CAL_FREQ)*duration;          //Calculate the target count     
@@ -234,11 +253,21 @@ void PPSinterrupt()
   } 
   if (USE_PHASE_DETECTOR && !phase_available) {
     phase = analogRead(A0);
+    if (p_min > phase) p_min = phase;
+    if (p_max < phase) p_max = phase;
     p_delta = phase - prev_phase;
     prev_phase = phase;
 
     if (phase_count < phase_count_max) {          // Result count_available when phase_count == phase_count_max
-      if (abs(p_delta)<250) {                   // Valid phase measurement, this to prevent phase wrapping
+
+      if (abs(p_delta) > (p_max - p_min)/2) { // unwrap
+        if (p_delta < 0)
+          p_delta += (p_max - p_min);
+        else
+          p_delta -= (p_max - p_min);
+      }
+      
+      if (abs(p_delta)<(p_max - p_min)/2) {
         if (phase_count == 0) {                // Reset sum 
           p_delta_sum = 0;
           prev_phase_average = phase_average;
@@ -261,12 +290,18 @@ void PPSinterrupt()
       }
     }
     if (dump_phase) {
+#if 1
       Serial.print(F("count="));
       Serial.print((int)delta_count);
       Serial.print(F(" phase="));
       Serial.print(phase);
       Serial.print(F(" delta="));
       Serial.println(p_delta);
+#else
+        if (fabs(p_delta)<200)
+          print_float(p_delta/2.0*1e-9,true);
+#endif
+//      Serial.print(F(" delta="));
     }
   }
   if(validGPSflag == 1) //Start the UTC timekeeping process
@@ -315,6 +350,9 @@ void PPSinterrupt()
     lock_led = !lock_led;
     digitalWrite(LOCK_LED, lock_led);
   }
+  if (lock_led)
+    digitalWrite(ALARM_LED, false);
+  prev_secs = secs;
 }
 
 String ToString(int64_t x)    // Very clumsy conversion of 64 bit numbers
@@ -346,17 +384,17 @@ String ToString(int64_t x)    // Very clumsy conversion of 64 bit numbers
 }  
 
 void print_float(float v, int n) {
-    int e = 0;
-    float f = v;
-    while (f != 0.0 && fabs(f) < 1.01) {
-      f *= 10.0;
-      e--;
-    }
-    Serial.print(f,1);
-    Serial.print(F("e"));
-    Serial.print(e);
-    if (n)
-        Serial.print(F("\n")); 
+  int e = 0;
+  float f = v;
+  while (f != 0.0 && fabs(f) < 1.01) {
+    f *= 10.0;
+    e--;
+  }
+  Serial.print(f,1);
+  Serial.print(F("e"));
+  Serial.print(e);
+  if (n)
+    Serial.print(F("\n")); 
 }
 void setup()
 {
@@ -365,9 +403,9 @@ void setup()
   SI5351aStart();  
   SI5351aSetFreq(SYNTH_MS_1, 10000000000LL,2);     // 10MHz, divide by 4
   SI5351aSetFreq(SYNTH_MS_0, 10000000000LL,0);    // 10MHz
-  SI5351aSetFreq(SYNTH_MS_2,100000000000LL,0);     // 100MHz
+  SI5351aSetFreq(SYNTH_MS_2, 10000000001LL,0);     // 10.000000001MHz 1mHz above 10MHz
   //  SI5351_write(CLK_ENABLE_CONTROL,0b00000100); // Turn OFF CLK2, not used
-  SI5351_write(CLK_ENABLE_CONTROL,0b00000000); // Turn ON CLK2
+  //  SI5351_write(CLK_ENABLE_CONTROL,0b00000000); // Turn ON CLK2
 
   //Set up Timer1 as a frequency counter - input at pin 5
   TCCR1B = 0;     //Disable Timer during setup
@@ -404,7 +442,7 @@ void setup()
   digitalWrite(ALARM_LED, HIGH);
   pinMode(LOCK_LED, OUTPUT);  // Lock lED
   digitalWrite(LOCK_LED, LOW);
-  pinMode(OPEN_LOOP, INPUT_PULLUP ); // Alarm LED for weird measured_count
+  pinMode(CLOSE_LOOP, INPUT_PULLUP ); // Alarm LED for weird measured_count
 
   // Set Arduino D2 for external interrupt input on the rising edge of GPS 1PPS
   attachInterrupt(0, PPSinterrupt, RISING);  
@@ -412,37 +450,37 @@ void setup()
   displ_setCursor(0,1);
   displ_print(F("Waiting for GPS"));
   Serial.print(F("high_gain="));
-    int e = 0;
-    float f = high_gain;
-    while (f != 0.0 && fabs(f) < 1.01) {
-      f *= 10.0;
-      e--;
-    }
-    Serial.print(f,1);
-    Serial.print(F("e"));
-    Serial.println(e);
+  int e = 0;
+  float f = high_gain;
+  while (f != 0.0 && fabs(f) < 1.01) {
+    f *= 10.0;
+    e--;
+  }
+  Serial.print(f,1);
+  Serial.print(F("e"));
+  Serial.println(e);
 
-   Serial.print(F("gain="));
-    e = 0;
-    f = gain;
-    while (f != 0.0 && fabs(f) < 1.01) {
-      f *= 10.0;
-      e--;
-    }
-    Serial.print(f,1);
-    Serial.print(F("e"));
-    Serial.println(e);
+  Serial.print(F("gain="));
+  e = 0;
+  f = gain;
+  while (f != 0.0 && fabs(f) < 1.01) {
+    f *= 10.0;
+    e--;
+  }
+  Serial.print(f,1);
+  Serial.print(F("e"));
+  Serial.println(e);
 
   Serial.println(F("Waiting for GPS"));
-  
+
 
 
   TCCR1B = 0;    //Turn off Counter
 
-    TCNT1 = 0;       //Reset counter to zero
-    low_count = 0;
-    high_count = 0;
-    TCCR1B = 7;    //Clock on rising edge of pin 5
+  TCNT1 = 0;       //Reset counter to zero
+  low_count = 0;
+  high_count = 0;
+  TCCR1B = 7;    //Clock on rising edge of pin 5
 
   // Turn OFF CLK2 
   //  SI5351.output_enable(SI5351_CLK2,0); 
@@ -471,7 +509,8 @@ long old_dac_high = 0;
 int dac_high = INITIAL_DAC_HIGH;
 
 void set_dac() {
-  if (dac_manual != 0)
+#ifdef DAC
+  if (dac_manual != -1)
     dac_out = dac_manual;
   else
     dac_out = (calfact_x10) * dac_mult + dac_base;
@@ -486,19 +525,20 @@ void set_dac() {
   { dac_out = 4095;}
 #endif
 
-      if (dac_high < 0)
-        dac_high = 0;
-      if (dac_high > 255)
-        dac_high = 255;
+  if (dac_high < 0)
+    dac_high = 0;
+  if (dac_high > 255)
+    dac_high = 255;
 
   if (dac_out != old_dac || old_dac_high != dac_high) {
 
     analogWrite(DAC_HIGH,dac_high);
     dac.setVoltage(dac_out, false);
-//    delay (abs(old_dac - dac_out)/10);
+    //    delay (abs(old_dac - dac_out)/10);
     old_dac = dac_out;
     old_dac_high = dac_high;
   }
+#endif
 }
 
 #if 0
@@ -507,27 +547,27 @@ int eeprom_start = 0;
 
 void do_eeprom(char c) {
   switch(c) {
-    case 'c':
-      for (int i=0; i<EEPROM.length(); i += 4) {
-        EEPROM[i] = 0;
-        EEPROM[i+1] = 0;
-      }
-      break;
-    case 'd':
-      eeprom_init();
-      for (int i=0; i < eeprom_start; i += 4) {
-        int d = EEPROM[i++] + (EEPROM[i++] <<8);
-        float f = EEPROM[i]  >= 128 ? EEPROM[i++] - 256 : EEPROM[i++]);
-        
-        int e =  EEPROM[i++];
-        Serial.print(F("corr="));
-        Serial.print(f);
-        Serial.print(F("e-"));
-        Serial.print(e);
-        Serial.print(F("dac="));
-        Serial.print(d);
-      }
-      break;
+  case 'c':
+    for (int i=0; i<EEPROM.length(); i += 4) {
+      EEPROM[i] = 0;
+      EEPROM[i+1] = 0;
+    }
+    break;
+  case 'd':
+    eeprom_init();
+    for (int i=0; i < eeprom_start; i += 4) {
+      int d = EEPROM[i++] + (EEPROM[i++] <<8);
+      float f = EEPROM[i]  >= 128 ? EEPROM[i++] - 256 : EEPROM[i++]);
+
+      int e =  EEPROM[i++];
+      Serial.print(F("corr="));
+      Serial.print(f);
+      Serial.print(F("e-"));
+      Serial.print(e);
+      Serial.print(F("dac="));
+      Serial.print(d);
+    }
+    break;
   }
 }
 
@@ -557,14 +597,19 @@ void eeprom_log(float corr, int dac) {
 void loop()
 {
   int update = false;
-  int phase_locked = false;
+  phase_locked = false;
   int lock = 0; 
   String str = "";
   int64_t target_freq,actual_freq;
+
+  secs = millis()/1000;
+  if (secs - prev_secs >= 2) {
+        digitalWrite(ALARM_LED, alarm_led);   // No PPS
+  }
   char c = testKey();
   switch(c) {
 #if 0
-    case 'e':
+  case 'e':
     do_eeprom(testKey());
     break;
 #endif
@@ -578,13 +623,17 @@ void loop()
     set_dac();
     return;
   case 'h':
+#ifdef DAC
     dac_high = Serial.parseInt();
     Serial.print(F("dac_high = "));
     Serial.println(dac_high); 
     set_dac();
+#else
+    hold = !hold;
+#endif
     return;
   case 'a':
-    dac_manual = 0;
+    dac_manual = -1;
     break;
   case '+':
     target_duration *= 2;
@@ -611,7 +660,7 @@ void loop()
   case 'r':
     calfact_x10 = 0;
     break;  
-  case 'f':
+  case 'o':
     force_duration = Serial.parseInt();
     phase_count = 0;
     pulse_count = 0;
@@ -627,7 +676,7 @@ void loop()
     Serial.println(dac_mult); 
     break;
   case 'c':
- // high dac
+    // high dac
 
     dac_manual = 2047;
     dac_high = 0;
@@ -658,11 +707,11 @@ void loop()
     Serial.print(F("high range=")); 
     print_float( ((float)high_count - (float)low_count)/(float)target_count, true);
 
-    
 
- // low dac 
+
+    // low dac 
     dac_high = INITIAL_DAC_HIGH;
-    dac_manual = 1;
+    dac_manual = 0;
     set_dac();
     Serial.println(F("wait 5s"));
     delay(5000);
@@ -677,7 +726,7 @@ void loop()
     set_dac();
     Serial.println(F("wait 5s"));
     delay(5000);
-///    target_duration = 80;
+    ///    target_duration = 80;
     pulse_count = 0;
     count_available = 0;
     phase_available = 0;
@@ -685,24 +734,26 @@ void loop()
     Serial.print(F("acount=")); str = ToString(measured_count);  Serial.print(str);
     Serial.print(F(" dcount=")); Serial.println((int)(measured_count -target_count));
     high_count = measured_count; 
-    
+
     Serial.print(F("low range=")); 
     print_float(((float)high_count - (float)low_count)/(float)target_count, true);
 
-    
-    dac_manual = 0;
+
+    dac_manual = -1;
     set_dac();
     count_available = 0;
     phase_available = 0;
     pulse_count = 0;
     return;
   }
-  if (validGPSflag == 0) 
+  if (validGPSflag == 0) {
     GPSprocess( ); //If GPS is selected, wait for valid NMEA data
-  else if (USE_PHASE_DETECTOR && target_duration >= phase_start_duration && count_available && phase_available) {
-
-    if (!digitalRead(OPEN_LOOP)) {
-
+    return;
+  }
+  if (USE_PHASE_DETECTOR && target_duration >= phase_start_duration) {
+    if ( ! (phase_available && count_available) )
+      return;
+    blink_alarm = false;
     // Speed
     if ( false &&fabs(p_delta_average) < 2.0 && !phase_wrap && prev_phase_average != -1 && fabs(phase_average - prev_phase_average) < 100) {
       speed = ( phase_average - prev_phase_average ) / phase_count;
@@ -710,30 +761,25 @@ void loop()
       min_corr = 1e-13;
       speed_available = 1;
     } else 
-    // Phase
-    if (fabs(p_delta_average) < 5.0) {
-      corr = -p_delta_average * 0.25e-9;      // Half speed to avoid overcompensations
-      min_corr = 22e-9 / phase_count;
-    }
-    else {
-      corr = -p_delta_average * 0.5e-9;     // resolution of phase detector
-      min_corr = 22e-9 / phase_count;
-    }
-    if (fabs(corr) > 20.0 * fabs(min_corr)) {
+      // Phase
+      if (fabs(p_delta_average) < 5.0) {
+        corr = -p_delta_average * 0.25e-9;      // Half speed to avoid overcompensations
+        min_corr = 22e-9 / phase_count;
+      }
+      else {
+        corr = -p_delta_average * 0.5e-9;     // resolution of phase detector
+        min_corr = 22e-9 / phase_count;
+      }
+    if (fabs(corr) > 50.0 * fabs(min_corr)) {
       phase_count_max /= 2;
     }
     if (fabs(corr) < 2.0 * fabs(min_corr)) {
       lock = 1;
       phase_count_max *= 2;
-      if (phase_count_max > 400)
-        phase_count_max = 400;
+      if (phase_count_max > 1600)
+        phase_count_max = 1600;
     }
-    if (force_duration)
-      phase_count_max = force_duration;
     target_duration = phase_count_max;
-    }
-    
-    
     if (fabs(p_delta_average) < 5.0) {
       blink_lock = false;
       digitalWrite(LOCK_LED,HIGH);   // final lock
@@ -742,8 +788,9 @@ void loop()
       blink_lock = true;
     phase_locked = true;
     update = true;
-  } else if(count_available && target_duration < phase_start_duration) // Frequency calculation data count_available                                   
-  {
+  } else {
+    if (!count_available)
+      return;
     digitalWrite(ALARM_LED, LOW);
     if (measured_count-target_count >= 0)               
       corr =(float)(measured_count-target_count)/ (float)target_count;
@@ -766,50 +813,59 @@ void loop()
     else  
 #endif
     {
-      blink_alarm = false;
+      blink_alarm = true;
       alarm = 0;
-      if (!digitalRead(OPEN_LOOP)) {
-       if(fabs(corr) == 0) // Within threshold, increase duration
-       {
+      if(fabs(corr) < 2.0 * fabs(min_corr)) // Within threshold, increase duration
+      {
         lock = 1;
         target_duration = duration * 2;
         if (target_duration > MAX_TIME)
           target_duration = MAX_TIME;
-       }
+      }
 
-       if (target_duration < phase_start_duration || !phase_locked) {   // Not yet in phase detection mode
+      if (target_duration < phase_start_duration || !phase_locked) {   // Not yet in phase detection mode
         if(abs(measured_count -target_count) > 10) // Too large, increase speed
         {
           target_duration = duration / 2;
           if (target_duration < MIN_DURATION)
             target_duration = MIN_DURATION;
         }
-       }
-      update = true;
       }
-
+      update = true;
     }
-    if (force_duration)
-      target_duration = force_duration;
 
   }
 
-  if (update && ! digitalRead(OPEN_LOOP) && ((SEARCH_OPTIMUM /* &&  abs(measdif_x10) > 3 */)|| fabs(corr) > 0 )) {
+  if (force_duration) {
+    phase_count_max = force_duration;
+    target_duration = force_duration;
+  }
+
+  if (update && digitalRead(CLOSE_LOOP) && ((SEARCH_OPTIMUM /* &&  abs(measdif_x10) > 3 */)|| fabs(corr) > 0 )) {
 
     if ((hour*60LL+minute)*60LL+second < 20LL) {
       calfact_x10=0; //freeze
       dac_high = INITIAL_DAC_HIGH;
-    } else if (fabs(corr) > 1.5*high_gain) {  // use high dac
+    }
+#ifdef DAC 
+    else if (fabs(corr) > 1.5*high_gain) {  // use high dac
       dac_high -=  corr / high_gain;
       calfact_x10 = 0;
     } else   
       calfact_x10=calfact_x10 - ( corr / gain ); // compute the new calfact
 
-    if (calfact_x10 > (float)MAX_CALFACT/dac_mult)
-      calfact_x10 = (float)MAX_CALFACT/dac_mult;
-    if (calfact_x10 < (float)MIN_CALFACT/dac_mult)
-      calfact_x10 = (float)MIN_CALFACT/dac_mult;
-
+    if (calfact_x10 > (float)MAX_CALFACT)
+      calfact_x10 = (float)MAX_CALFACT;
+    if (calfact_x10 < (float)MIN_CALFACT)
+      calfact_x10 = (float)MIN_CALFACT;
+#else
+    else {
+      if (!hold) 
+        XtalFreq_x1000 = XtalFreq_x1000 + (int64_t)(((float)XtalFreq_x1000) * corr);
+      else
+        XtalFreq_x1000 = INITIAL_XTAL;
+    }    
+#endif
     LCDmeasdif(); // Call the display Error E (measdif) routine
 
 #ifdef DAC
@@ -819,7 +875,7 @@ void loop()
 #else    
 
     target_freq = 10000000000;
-    XtalFreq_x1000 = INITIAL_XTAL - (INITIAL_XTAL / 10000000LL ) * calfact_x10/ 10000LL;     // calfact is versus 10MHz in 1/1000 Hz
+    //    XtalFreq_x1000 = INITIAL_XTAL - (INITIAL_XTAL / 10000000LL ) * calfact_x10/ 10000LL;     // calfact is versus 10MHz in 1/1000 Hz
 
     // 
     // This routine searches the best combination of PLL and fractional divider settings to minimize the frequency error
@@ -847,8 +903,9 @@ void loop()
       }
     }
     SI5351aActualPLLFreq(f_a,f_b,f_c);
-    SI5351aSetPLLFreq(f_a,f_b,f_c);
+    SI5351aSetPLLFreq(0, f_a,f_b,f_c);
     actual_freq = SI5351aActualFreq(target_freq);
+    
 #if 0
     Serial.print(F("a,b,c="));
     Serial.print(f_a);
@@ -861,19 +918,53 @@ void loop()
     SI5351aSetFreq(SYNTH_MS_1,target_freq,2);  // 2.5MHz
     actual_freq=SI5351aSetFreq(SYNTH_MS_0,target_freq,0);    // 10MHz
 
+// --------------------------- output 2 -------------------
+
+    target_freq = 10000000100;
+   {
+    // This routine searches the best combination of PLL and fractional divider settings to minimize the frequency error
+    uint32_t a,b,c, f_a=A_STOP,f_b=0,f_c;
+#define C_START (1048575UL - 10000UL)
+    f_c = c = C_START;
+    uint32_t delta = 100000000;
+
+    if (SEARCH_OPTIMUM)         // XTAL drifts when changing VCO PLL settings so skip
+    {
+      for (a = A_START; a<=A_STOP; a++) {
+        for (b = 524287UL; b <524303UL; b++) {
+          //          for (c = C_START-20; c< C_START; c++) {
+          SI5351aActualPLLFreq(a,b,c);
+          actual_freq = SI5351aActualFreq(target_freq);
+          if (abs(actual_freq - target_freq) < delta) {
+            delta = abs(actual_freq - target_freq);
+            f_a = a;
+            f_b = b;
+            f_c = c;
+          }
+          //          }
+        }
+      }
+    }
+    SI5351aActualPLLFreq(f_a,f_b,f_c);
+    SI5351aSetPLLFreq(1, f_a,f_b,f_c);
+    actual_freq = SI5351aActualFreq(target_freq);
+    actual_freq=SI5351aSetFreq(SYNTH_MS_2,target_freq,0);
+   }
+// --------------------------------------------------------
+
     if (SEARCH_OPTIMUM)
-      SI5351_write(CLK_ENABLE_CONTROL,0b00000100); // Turn ON CLK0 and CLK1
+      SI5351_write(CLK_ENABLE_CONTROL,0b00000000); // Turn ON CLK0 and CLK1
 
 #endif
     //    p_delta_sum = 0;
     //    p_delta_average = 0.0;
   }
 
-  if (dac_manual != 0) {
+  if (dac_manual != -1) {
     set_dac();
   }
 
-  if (update) {
+  if (update && !dump_phase) {
     Serial.print(hour);
     Serial.print(F(":"));
     if (minute < 10) Serial.print(F("0"));
@@ -884,7 +975,7 @@ void loop()
     Serial.print(F(" dur="));
 
     if (phase_locked) {
-        Serial.print(phase_count);  
+      Serial.print(phase_count);  
       if (speed_available) {
         Serial.print(F(" speed=")); Serial.print(speed, 4); 
       } else {
@@ -912,7 +1003,7 @@ void loop()
     Serial.print(f,1);
     Serial.print(F("e"));
     Serial.print(e);
- 
+
 
     Serial.print(F(" corr="));
     e = 0;
@@ -930,13 +1021,18 @@ void loop()
     Serial.print(F(" hdac = "));
     Serial.print(dac_high);
     Serial.print(F(" dac = "));
-    Serial.print(dac_out);
+    if (dac_manual == -1)
+      Serial.print(dac_out);
+    else
+      Serial.print(dac_manual);  
+#else
+    Serial.print(F(" xtal=")); str = ToString(XtalFreq_x1000);  Serial.print(str);
 #endif
     if (target_freq!=actual_freq) {
       Serial.print(F(" Freq_Error = "));
       Serial.print((int)(target_freq-actual_freq));
     }
-    if (digitalRead(OPEN_LOOP))
+    if (!digitalRead(CLOSE_LOOP))
       Serial.print(F(" OPEN"));
     if (lock) 
       Serial.println(F(" Lock"));
@@ -1128,7 +1224,7 @@ int64_t SI5351aActualPLLFreq(uint32_t a,uint32_t b,uint32_t c)
   return PLLFReq_x1000;
 }
 
-int64_t SI5351aSetPLLFreq(uint32_t a,uint32_t b,uint32_t c)
+int64_t SI5351aSetPLLFreq(int pll, uint32_t a,uint32_t b,uint32_t c)
 {
   PLLFReq_x1000 = (XtalFreq_x1000 * (a * c + b) / c);
 
@@ -1153,6 +1249,7 @@ int64_t SI5351aSetPLLFreq(uint32_t a,uint32_t b,uint32_t c)
   p1 += (128 * b / c);
   p1 -= 512;
 
+  if (pll == 0) {
   // Write data to PLL registers
   SI5351_write(SYNTH_PLL_A + 0, (p3 & 0xFF00)>>8);
   SI5351_write(SYNTH_PLL_A + 1, (p3 & 0xFF));
@@ -1162,7 +1259,7 @@ int64_t SI5351aSetPLLFreq(uint32_t a,uint32_t b,uint32_t c)
   SI5351_write(SYNTH_PLL_A + 5, ((p3 & 0xF0000) >> 12) | ((p2 & 0x000F0000) >> 16));
   SI5351_write(SYNTH_PLL_A + 6, (p2 & 0x0000FF00) >> 8);
   SI5351_write(SYNTH_PLL_A + 7, (p2 & 0x000000FF));
-
+  } else { 
   SI5351_write(SYNTH_PLL_B + 0, (p3 & 0xFF00)>>8);
   SI5351_write(SYNTH_PLL_B + 1, (p3 & 0xFF));
   SI5351_write(SYNTH_PLL_B + 2, (p1 & 0x00030000) >> 16);
@@ -1171,6 +1268,7 @@ int64_t SI5351aSetPLLFreq(uint32_t a,uint32_t b,uint32_t c)
   SI5351_write(SYNTH_PLL_B + 5, ((p3 & 0xF0000) >> 12) | ((p2 & 0x000F0000) >> 16));
   SI5351_write(SYNTH_PLL_B + 6, (p2 & 0x0000FF00) >> 8);
   SI5351_write(SYNTH_PLL_B + 7, (p2 & 0x000000FF));
+  }
 }
 
 //******************************************************************
@@ -1186,7 +1284,8 @@ void SI5351aStart()
   SI5351_write(CLK2_CONTROL,0b00101111);       // Set PLLB to CLK2, 8 mA output
   SI5351_write(PLL_RESET,0b10100000);          // Reset PLLA and PLLB
 
-  SI5351aSetPLLFreq((uint32_t)A_STOP,(uint32_t)0,(uint32_t)0xFFFFFUL);
+  SI5351aSetPLLFreq(0, (uint32_t)A_STOP,(uint32_t)0,(uint32_t)0xFFFFFUL);
+  SI5351aSetPLLFreq(1, (uint32_t)A_STOP,(uint32_t)0,(uint32_t)0xFFFFFUL);
 }
 
 //******************************************************************
